@@ -3,6 +3,7 @@
 
 #include "agent.hpp"
 #include "config.hpp"
+#include "envinfo.hpp"
 #include "mcp.hpp"
 #include "openrouter.hpp"
 #include "tools.hpp"
