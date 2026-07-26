@@ -4,11 +4,18 @@
 #include "selftest.hpp"
 
 #include "agent.hpp"
+#include "attach.hpp"
 #include "common.hpp"
 #include "config.hpp"
+#include "envinfo.hpp"
 #include "http.hpp"
+#include "job.hpp"
 #include "openrouter.hpp"
+#include "render.hpp"
 #include "tools.hpp"
+#include "utf8.hpp"
+#include "webtools.hpp"
+#include "yaml.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -324,6 +331,444 @@ void test_tools() {
     fs::remove_all(dir);
 }
 
+void test_utf8() {
+    std::printf("[utf8]\n");
+    const std::string ascii = "hello";
+    const std::string accent = "caf\xC3\xA9";                 // café
+    const std::string cjk = "\xE6\x97\xA5\xE6\x9C\xAC";       // 日本
+    const std::string emoji = "\xF0\x9F\x8E\x89";             // party popper
+
+    check(utf8::width(ascii) == 5, "ascii width");
+    check(utf8::width(accent) == 4, "2-byte sequence counts as one column");
+    check(utf8::width(cjk) == 4, "CJK counts as two columns each");
+    check(utf8::width(emoji) == 2, "emoji counts as two columns");
+    check(utf8::valid(accent) && utf8::valid(cjk) && utf8::valid(emoji),
+          "valid() accepts well-formed input");
+    check(!utf8::valid("a\xFF\xFE"), "valid() rejects stray bytes");
+
+    // The bug that caused the reported rendering artifacts: truncating by bytes
+    // splits a sequence and paints garbage.
+    check(utf8::truncate_to_width(accent, 3) == "caf",
+          "truncate stops on a codepoint boundary");
+    std::string t = utf8::truncate_to_width(cjk, 3);
+    check(t == "\xE6\x97\xA5", "truncate never splits a wide char");
+    check(utf8::valid(utf8::truncate_to_width(emoji, 1)),
+          "truncating below a wide char yields valid output");
+
+    check(utf8::step(accent, 0, 1) == 1, "step over 1-byte char");
+    check(utf8::step(accent, 3, 1) == 5, "step over 2-byte char");
+    check(utf8::step(accent, 5, -1) == 3, "step backwards over 2-byte char");
+    check(utf8::floor_boundary(accent, 4) == 3, "floor_boundary snaps back");
+
+    auto wrapped = utf8::wrap(cjk + cjk + cjk, 4);
+    check(wrapped.size() == 3, "wrap counts columns, not bytes");
+    for (const auto& l : wrapped) check(utf8::valid(l), "wrapped line is valid utf8");
+
+    check(utf8::repair("a\xFFb").find("\xEF\xBF\xBD") != std::string::npos,
+          "repair substitutes U+FFFD");
+    check(utf8::sanitize("a\tb", 4) == "a    b", "sanitize expands tabs");
+    // Octal escapes, not hex: "\x01b" would be read as the single byte 0x1B
+    // because a hex escape consumes every hex digit that follows it.
+    check(utf8::sanitize("a\001b").find("^A") != std::string::npos,
+          "sanitize escapes control characters");
+    check(utf8::sanitize("a\033b").find("^[") != std::string::npos,
+          "sanitize escapes ESC so it cannot drive the terminal");
+    check(utf8::elide(cjk + cjk + cjk, 6).size() > 0 &&
+          utf8::valid(utf8::elide(cjk + cjk + cjk, 6)), "elide stays valid");
+}
+
+void test_yaml() {
+    std::printf("[yaml]\n");
+    auto ok_parse = [](const std::string& text, json* out) {
+        std::string err;
+        bool r = yaml::parse(text, out, &err);
+        if (!r) std::printf("        (parse error: %s)\n", err.c_str());
+        return r;
+    };
+
+    {
+        json j;
+        check(ok_parse("a: 1\nb: hello\nc: true\nd: 1.5\ne: ~", &j), "scalars parse");
+        check(j["a"] == 1, "integer inferred");
+        check(j["b"] == "hello", "string inferred");
+        check(j["c"] == true, "bool inferred");
+        check(j["d"] == 1.5, "float inferred");
+        check(j["e"].is_null(), "~ is null");
+    }
+    {
+        json j;
+        check(ok_parse("outer:\n  inner: 2\n  deep:\n    x: y\n", &j), "nested maps");
+        check(j["outer"]["inner"] == 2, "nested value");
+        check(j["outer"]["deep"]["x"] == "y", "twice-nested value");
+    }
+    {
+        json j;
+        check(ok_parse("list:\n  - one\n  - two\n", &j), "block sequence");
+        check(j["list"].is_array() && j["list"].size() == 2, "sequence length");
+        check(j["list"][1] == "two", "sequence item");
+    }
+    {
+        json j;
+        check(ok_parse("flow: [a, b, c]\nmap: {x: 1, y: 2}\n", &j), "flow collections");
+        check(j["flow"].size() == 3 && j["flow"][2] == "c", "flow sequence");
+        check(j["map"]["y"] == 2, "flow mapping");
+    }
+    {
+        // A mapping that begins on the dash line -- the fiddliest common case.
+        json j;
+        check(ok_parse("items:\n  - name: a\n    value: 1\n  - name: b\n    value: 2\n",
+                       &j),
+              "sequence of mappings");
+        check(j["items"].size() == 2, "two mappings in sequence");
+        check(j["items"][0]["name"] == "a" && j["items"][1]["value"] == 2,
+              "dash-line mapping keys");
+    }
+    {
+        json j;
+        check(ok_parse("# leading comment\nk: v  # trailing\nq: \"has # hash\"\n", &j),
+              "comments stripped");
+        check(j["k"] == "v", "trailing comment removed");
+        check(j["q"] == "has # hash", "hash inside quotes preserved");
+    }
+    {
+        json j;
+        check(ok_parse("text: |\n  line one\n  line two\n", &j), "literal block scalar");
+        check(j["text"] == "line one\nline two\n", "literal block keeps newlines");
+    }
+    {
+        json j;
+        check(ok_parse("text: >-\n  folded one\n  folded two\n", &j), "folded block scalar");
+        check(j["text"] == "folded one folded two", "folded block joins lines");
+    }
+    {
+        json j;
+        std::string err;
+        check(!yaml::parse("a:\n\tb: 1\n", &j, &err), "tab indentation rejected");
+        check(err.find("tab") != std::string::npos, "tab error explains itself");
+    }
+    {
+        std::string f, b, err;
+        check(yaml::split_frontmatter("---\na: 1\n---\nbody here\n", &f, &b, &err),
+              "frontmatter split");
+        check(trim(f) == "a: 1", "frontmatter content");
+        check(trim(b) == "body here", "body content");
+    }
+    {
+        std::string f, b, err;
+        check(yaml::split_frontmatter("no frontmatter\n", &f, &b, &err),
+              "document without frontmatter");
+        check(f.empty() && trim(b) == "no frontmatter", "all body");
+    }
+    {
+        std::string f, b, err;
+        check(!yaml::split_frontmatter("---\na: 1\nnever closed\n", &f, &b, &err),
+              "unclosed frontmatter is an error");
+    }
+}
+
+void test_job() {
+    std::printf("[job files]\n");
+    const std::string text =
+        "---\n"
+        "name: demo\n"
+        "model: z-ai/glm-5.2\n"
+        "models: [deepseek/deepseek-v4-pro, moonshotai/kimi-k3]\n"
+        "provider:\n"
+        "  sort: throughput\n"
+        "  order: [together, fireworks]\n"
+        "  allow_fallbacks: false\n"
+        "  data_collection: deny\n"
+        "reasoning:\n"
+        "  effort: high\n"
+        "temperature: 0.3\n"
+        "max_turns: 12\n"
+        "web_search: true\n"
+        "tools:\n"
+        "  allow: [bash, edit_file]\n"
+        "  deny: [file_op]\n"
+        "environment:\n"
+        "  detail: brief\n"
+        "  knowledge: false\n"
+        "---\n"
+        "Do the thing.\n";
+
+    job::Spec spec;
+    std::vector<std::string> warn;
+    std::string err;
+    check(job::parse_text(text, &spec, &warn, &err),
+          "job parses" + (err.empty() ? "" : ": " + err));
+    check(spec.name == "demo", "job name");
+    check(spec.model == "z-ai/glm-5.2", "job model");
+    check(spec.model_fallbacks.size() == 2, "fallback models");
+    check(spec.provider["sort"] == "throughput", "provider sort");
+    check(spec.provider["order"].size() == 2, "provider order list");
+    check(spec.provider["allow_fallbacks"] == false, "provider allow_fallbacks");
+    check(spec.reasoning["effort"] == "high", "reasoning effort");
+    check(spec.temperature && *spec.temperature == 0.3, "temperature");
+    check(spec.max_turns && *spec.max_turns == 12, "max_turns");
+    check(spec.web_search && *spec.web_search, "web_search");
+    check(spec.allow_tools.size() == 2 && spec.deny_tools.size() == 1, "tool lists");
+    check(spec.env_detail == "brief", "environment detail");
+    check(spec.knowledge && !*spec.knowledge, "knowledge disabled");
+    check(trim(spec.prompt) == "Do the thing.", "prompt body");
+
+    // "models:" alone should promote the first entry to primary.
+    {
+        job::Spec s2;
+        std::string e2;
+        check(job::parse_text("---\nmodels: [a/one, b/two]\n---\nbody\n", &s2, nullptr,
+                              &e2),
+              "models-only job parses");
+        check(s2.model == "a/one" && s2.model_fallbacks.size() == 1,
+              "first model promoted to primary");
+    }
+    // An empty body is a usage error, not a silent no-op.
+    {
+        job::Spec s3;
+        std::string e3;
+        check(!job::parse_text("---\nmodel: x/y\n---\n\n", &s3, nullptr, &e3),
+              "empty job body rejected");
+    }
+    // Unknown keys must be reported rather than silently dropped.
+    {
+        job::Spec s4;
+        std::vector<std::string> w4;
+        std::string e4;
+        job::parse_text("---\nmodle: typo\n---\nbody\n", &s4, &w4, &e4);
+        bool mentioned = false;
+        for (const std::string& w : w4)
+            if (w.find("modle") != std::string::npos) mentioned = true;
+        check(mentioned, "typo in frontmatter key warned about");
+    }
+
+    // Config application
+    {
+        Config cfg;
+        job::apply_to_config(spec, &cfg);
+        check(cfg.model == "z-ai/glm-5.2", "config model applied");
+        check(cfg.max_turns == 12, "config max_turns applied");
+        check(cfg.web_search, "config web_search applied");
+        check(cfg.provider["sort"] == "throughput", "config provider applied");
+    }
+}
+
+void test_multimodal() {
+    std::printf("[multimodal]\n");
+    check(attach::is_image_mime("image/png"), "image mime detected");
+    check(!attach::is_image_mime("text/plain"), "non-image mime");
+
+    std::string dir = "/tmp/ppcode-attach-test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    // A minimal but real PNG header so magic-byte sniffing has something to see.
+    std::string png = std::string("\x89PNG\r\n\x1a\n", 8) + std::string(64, '\0');
+    write_file_text(dir + "/pic.png", png, nullptr);
+    write_file_text(dir + "/notes.txt", "hello notes", nullptr);
+
+    check(attach::detect_mime(dir + "/pic.png") == "image/png",
+          "png detected by magic bytes");
+    check(starts_with(attach::detect_mime(dir + "/notes.txt"), "text/"),
+          "text detected by extension");
+
+    {
+        attach::Loaded l = attach::load("pic.png", "auto", "auto", true, dir);
+        check(l.ok, "image loads for a vision model");
+        check(l.part.type == ContentPart::Type::ImageUrl, "image becomes an image part");
+        check(starts_with(l.part.url, "data:image/png;base64,"), "image becomes a data URI");
+    }
+    {
+        // Degrading rather than failing is the point here.
+        attach::Loaded l = attach::load("pic.png", "auto", "auto", false, dir);
+        check(l.ok, "image attachment degrades for a text-only model");
+        check(l.part.type == ContentPart::Type::Text, "degraded to a text description");
+        check(l.part.text.find("cannot see images") != std::string::npos,
+              "degradation explains itself");
+    }
+    {
+        attach::Loaded l = attach::load("notes.txt", "auto", "auto", true, dir);
+        check(l.ok && l.part.type == ContentPart::Type::Text, "text file inlined");
+        check(l.part.text.find("hello notes") != std::string::npos, "text content present");
+    }
+    {
+        attach::Loaded l = attach::load("missing.png", "auto", "auto", true, dir);
+        check(!l.ok, "missing attachment reports an error");
+    }
+    {
+        attach::Loaded l = attach::load("https://example.com/x.png", "auto", "auto",
+                                        true, dir);
+        check(l.ok && l.part.url == "https://example.com/x.png",
+              "remote image passed through as a URL");
+    }
+
+    // Message serialisation with parts
+    {
+        Message m;
+        m.role = "user";
+        m.parts.push_back(ContentPart::make_text("look"));
+        m.parts.push_back(ContentPart::make_image("data:image/png;base64,AAA", "high"));
+        json j = m.to_json();
+        check(j["content"].is_array(), "multi-part content is an array");
+        check(j["content"][0]["type"] == "text", "text part serialised");
+        check(j["content"][1]["type"] == "image_url", "image part serialised");
+        check(j["content"][1]["image_url"]["detail"] == "high", "image detail sent");
+        check(m.display_text().find("[image:") != std::string::npos,
+              "display_text hides the data URI");
+    }
+
+    check(base64_encode("") == "", "base64 of empty string");
+    check(base64_encode("f") == "Zg==", "base64 one byte");
+    check(base64_encode("fo") == "Zm8=", "base64 two bytes");
+    check(base64_encode("foo") == "Zm9v", "base64 three bytes");
+    check(base64_encode("hello world") == "aGVsbG8gd29ybGQ=", "base64 longer string");
+
+    fs::remove_all(dir);
+}
+
+void test_render() {
+    std::printf("[render]\n");
+    check(render::rgb_to_256({0, 0, 0}) == 16, "rgb_to_256 black");
+    check(render::rgb_to_256({255, 255, 255}) == 231, "rgb_to_256 white");
+    int grey = render::rgb_to_256({128, 128, 128});
+    check(grey >= 232 && grey <= 255, "mid grey maps to the grey ramp");
+    check(render::rgb_to_16({200, 0, 0}) == 1, "rgb_to_16 red");
+    check(render::rgb_to_16({0, 170, 170}) == 6, "rgb_to_16 cyan");
+
+    check(render::detect_depth(0, false) == render::ColorDepth::Mono, "no colour");
+    check(render::detect_depth(8, true) == render::ColorDepth::Ansi16, "16 colour");
+    check(render::detect_depth(256, true) == render::ColorDepth::Ansi256, "256 colour");
+    check(render::detect_depth(0x10000, true) == render::ColorDepth::TrueColor,
+          "direct colour terminfo");
+
+    {
+        auto lines = render::markdown("# Title\n\nSome **bold** text.\n", 60, false);
+        check(!lines.empty(), "markdown produces lines");
+        bool found_heading = false, found_bold = false;
+        for (const auto& l : lines)
+            for (const auto& s : l.spans) {
+                if (s.style == render::Style::Heading1) found_heading = true;
+                if (s.style == render::Style::Bold) found_bold = true;
+            }
+        check(found_heading, "heading styled");
+        check(found_bold, "bold styled");
+    }
+    {
+        auto lines = render::markdown("- one\n- two\n", 60, false);
+        bool gutter = false;
+        for (const auto& l : lines) if (!l.gutter.empty()) gutter = true;
+        check(gutter, "list items get a gutter");
+    }
+    {
+        auto lines = render::markdown("```cpp\nint x = 42; // note\n```\n", 60, false);
+        bool kw = false, num = false, com = false;
+        for (const auto& l : lines)
+            for (const auto& s : l.spans) {
+                if (s.style == render::Style::Type) kw = true;
+                if (s.style == render::Style::Number) num = true;
+                if (s.style == render::Style::Comment) com = true;
+            }
+        check(kw, "cpp type highlighted");
+        check(num, "number highlighted");
+        check(com, "comment highlighted");
+    }
+    check(render::language_supported("python"), "python highlighter present");
+    check(render::language_supported("sh"), "shell highlighter present");
+    check(render::language_supported("diff"), "diff highlighter present");
+    check(!render::language_supported("brainfuck"), "unknown language reported");
+    {
+        // A code block must never be re-flowed in a way that loses text.
+        auto lines = render::highlight("    indented = 1", "python", 80);
+        check(!lines.empty() && lines[0].plain().find("    indented") == 0,
+              "code keeps indentation");
+    }
+}
+
+void test_web() {
+    std::printf("[web]\n");
+    check(web::html_to_text("<p>Hello <b>world</b></p>").find("Hello") !=
+              std::string::npos,
+          "html_to_text extracts text");
+    check(web::html_to_text("<script>var x=1;</script><p>ok</p>").find("var x") ==
+              std::string::npos,
+          "script contents dropped");
+    check(web::html_to_text("<p>a&amp;b &lt;c&gt;</p>").find("a&b <c>") !=
+              std::string::npos,
+          "entities decoded");
+    check(web::html_to_text("<p>&#65;&#x42;</p>").find("AB") != std::string::npos,
+          "numeric entities decoded");
+    check(web::html_title("<html><head><title>Hi There</title></head></html>") ==
+              "Hi There",
+          "title extracted");
+    {
+        std::string txt = web::html_to_text("<div>one</div><div>two</div>");
+        check(txt.find("one") != std::string::npos &&
+                  txt.find("two") != std::string::npos,
+              "block elements separated");
+    }
+    {
+        web::SearchConfig c;
+        check(c.resolve() == web::SearchBackend::Reference,
+              "no keys falls back to reference search");
+        check(!c.availability_note().empty(), "availability note explains the situation");
+        c.tavily_key = "x";
+        check(c.resolve() == web::SearchBackend::Tavily, "tavily preferred when keyed");
+    }
+    {
+        bool ok = false;
+        check(web::backend_from_string("brave", &ok) == web::SearchBackend::Brave && ok,
+              "backend parsed");
+        web::backend_from_string("nonsense", &ok);
+        check(!ok, "bad backend name reported");
+    }
+}
+
+void test_envinfo() {
+    std::printf("[envinfo]\n");
+    bool ok = false;
+    check(envinfo::detail_from_string("full", &ok) == envinfo::Detail::Full && ok,
+          "detail parsed");
+    envinfo::detail_from_string("nope", &ok);
+    check(!ok, "bad detail name reported");
+    check(envinfo::detail_to_string(envinfo::Detail::Brief) == "brief",
+          "detail round-trips");
+
+    // Detail must scale with the context window: a small model should get less.
+    envinfo::Probe p;
+    p.ok = true;
+    p.hostname = "test";
+    p.model_name = "Power Mac G5";
+    p.machine_model = "PowerMac11,2";
+    p.os_name = "Mac OS X Server";
+    p.os_version = "10.5.8";
+    p.cpu_count = 2;
+    p.memory_bytes = 17179869184ULL;
+    p.big_endian = true;
+    p.ports_prefix = "/opt/local";
+    for (int i = 0; i < 300; i++)
+        p.ports.push_back("port-" + std::to_string(i) + " @1.0.0");
+    p.caveats.push_back("a caveat that takes up some room in the rendering");
+
+    check(!envinfo::render(p, envinfo::Detail::Minimal).empty(), "minimal renders");
+    check(envinfo::render(p, envinfo::Detail::None).empty(), "none renders nothing");
+
+    size_t minimal = envinfo::render(p, envinfo::Detail::Minimal).size();
+    size_t brief = envinfo::render(p, envinfo::Detail::Brief).size();
+    size_t full = envinfo::render(p, envinfo::Detail::Full).size();
+    check(minimal < brief && brief < full, "detail levels grow monotonically");
+
+    check(envinfo::choose_detail(p, 1000000) == envinfo::Detail::Full,
+          "huge context gets full detail");
+    envinfo::Detail small = envinfo::choose_detail(p, 16000);
+    check(small == envinfo::Detail::Minimal || small == envinfo::Detail::Brief,
+          "small context gets reduced detail");
+    check(envinfo::choose_detail(p, 4000) != envinfo::Detail::Full,
+          "tiny context never gets full detail");
+    check(envinfo::render(p, envinfo::Detail::Full).find("big-endian") !=
+              std::string::npos,
+          "endianness stated");
+    check(envinfo::estimate_tokens("abcd") >= 1, "token estimate");
+}
+
 void test_config() {
     std::printf("[config]\n");
     std::vector<std::string> warn;
@@ -396,11 +841,18 @@ int run_selftest(bool with_network) {
     std::printf("ppcode self-test -- %s\n\n", http::version_string().c_str());
     test_strings();
     test_json_helpers();
+    test_utf8();
+    test_yaml();
     test_sse_parser();
     test_stream_assembler();
     test_message_serialisation();
     test_glob_and_shell();
     test_tools();
+    test_job();
+    test_multimodal();
+    test_render();
+    test_web();
+    test_envinfo();
     test_config();
     test_agent_offline();
     if (with_network) test_network();

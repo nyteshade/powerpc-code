@@ -158,6 +158,40 @@ bool write_file_text(const std::string& path, const std::string& data, std::stri
     return true;
 }
 
+std::string base64_encode(const std::string& data) {
+    static const char* tbl =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((data.size() + 2) / 3) * 4);
+
+    size_t i = 0;
+    while (i + 2 < data.size()) {
+        uint32_t v = (static_cast<unsigned char>(data[i]) << 16) |
+                     (static_cast<unsigned char>(data[i + 1]) << 8) |
+                     static_cast<unsigned char>(data[i + 2]);
+        out += tbl[(v >> 18) & 0x3F];
+        out += tbl[(v >> 12) & 0x3F];
+        out += tbl[(v >> 6) & 0x3F];
+        out += tbl[v & 0x3F];
+        i += 3;
+    }
+    size_t rem = data.size() - i;
+    if (rem == 1) {
+        uint32_t v = static_cast<unsigned char>(data[i]) << 16;
+        out += tbl[(v >> 18) & 0x3F];
+        out += tbl[(v >> 12) & 0x3F];
+        out += "==";
+    } else if (rem == 2) {
+        uint32_t v = (static_cast<unsigned char>(data[i]) << 16) |
+                     (static_cast<unsigned char>(data[i + 1]) << 8);
+        out += tbl[(v >> 18) & 0x3F];
+        out += tbl[(v >> 12) & 0x3F];
+        out += tbl[(v >> 6) & 0x3F];
+        out += '=';
+    }
+    return out;
+}
+
 std::string expand_user(const std::string& path) {
     if (path.empty() || path[0] != '~') return path;
     const char* home = std::getenv("HOME");

@@ -2,10 +2,15 @@
 #include "agent.hpp"
 #include "common.hpp"
 #include "config.hpp"
+#include "envinfo.hpp"
 #include "headless.hpp"
 #include "http.hpp"
+#include "job.hpp"
+#include "jobs.hpp"
 #include "mcp.hpp"
 #include "openrouter.hpp"
+#include "sysprompt.hpp"
+#include "webtools.hpp"
 #include "selftest.hpp"
 #include "tools.hpp"
 #include "ui.hpp"
@@ -26,9 +31,13 @@ const char* kUsage =
     "  ppcode                          start the interactive TUI\n"
     "  ppcode -p \"prompt\"              run one prompt and exit\n"
     "  echo \"prompt\" | ppcode -p       read the prompt from stdin\n"
+    "  ppcode -j task.md               run a markdown job file\n"
     "\n"
     "OPTIONS\n"
     "  -p, --print [PROMPT]     non-interactive; prompt may also come from stdin\n"
+    "  -j, --job FILE           run a job file: YAML frontmatter + markdown body\n"
+    "      --attach PATH        attach a file or image (repeatable)\n"
+    "      --dry-run            with --job, show the resolved settings and exit\n"
     "      --output FORMAT      text (default), json, or stream-json\n"
     "  -m, --model ID           model to use, e.g. anthropic/claude-sonnet-4.5\n"
     "  -C, --cwd DIR            working directory for tools\n"
@@ -40,6 +49,10 @@ const char* kUsage =
     "  -q, --quiet              suppress progress output on stderr\n"
     "      --resume PATH        load a saved session first\n"
     "      --save PATH          write the session out when done\n"
+    "      --env-detail LEVEL   machine context: none|minimal|brief|standard|full\n"
+    "      --refresh-env        re-probe the machine instead of using the cache\n"
+    "      --no-knowledge       omit the platform knowledge documents\n"
+    "      --show-context       report how the system message was assembled\n"
     "      --list-models [SUB]  list available models, optionally filtered\n"
     "      --write-config       write a default config file and exit\n"
     "      --selftest [--net]   run internal checks\n"
@@ -105,6 +118,10 @@ int main(int argc, char** argv) {
     bool want_list = false, want_write_config = false, want_help = false;
     bool want_version = false;
     bool yolo = false, quiet = false;
+    bool refresh_env = false, no_knowledge = false, show_context = false;
+    std::string env_detail_opt, job_path;
+    bool dry_run = false;
+    std::vector<std::string> attach_paths;
     int max_turns = -1;
     std::string prompt, resume_path, save_path;
     std::vector<std::string> allow_tools, deny_tools;
@@ -120,6 +137,17 @@ int main(int argc, char** argv) {
         else if (a == "--yolo")                    yolo = true;
         else if (a == "-q" || a == "--quiet")      quiet = true;
         else if (a == "--write-config")            want_write_config = true;
+        else if (a == "--refresh-env")             refresh_env = true;
+        else if (a == "--no-knowledge")            no_knowledge = true;
+        else if (a == "--show-context")            show_context = true;
+        else if (a == "--dry-run")                 dry_run = true;
+        else if (a == "--env-detail") { if (!need("--env-detail", &env_detail_opt)) return 2; }
+        else if (a == "-j" || a == "--job") { if (!need("--job", &job_path)) return 2; }
+        else if (a == "--attach") {
+            std::string v;
+            if (!need("--attach", &v)) return 2;
+            attach_paths.push_back(v);
+        }
         else if (a == "-p" || a == "--print") {
             want_print = true;
             // The prompt is optional here; without it we read stdin.
@@ -186,6 +214,35 @@ int main(int argc, char** argv) {
     for (const std::string& w : warnings)
         std::fprintf(stderr, "ppcode: %s\n", w.c_str());
 
+    // A job file is read before the CLI overrides so that explicit flags still
+    // win over what the file says.
+    job::Spec jobspec;
+    bool have_job = false;
+    if (!job_path.empty()) {
+        std::vector<std::string> jwarn;
+        std::string jerr;
+        if (!job::parse_file(job_path, &jobspec, &jwarn, &jerr)) {
+            std::fprintf(stderr, "ppcode: %s\n", jerr.c_str());
+            return 2;
+        }
+        for (const std::string& w : jwarn)
+            std::fprintf(stderr, "ppcode: job: %s\n", w.c_str());
+        job::apply_to_config(jobspec, &cfg);
+        have_job = true;
+
+        for (const std::string& t : jobspec.allow_tools) allow_tools.push_back(t);
+        for (const std::string& t : jobspec.deny_tools)  deny_tools.push_back(t);
+        if (!jobspec.env_detail.empty() && env_detail_opt.empty())
+            env_detail_opt = jobspec.env_detail;
+        if (jobspec.knowledge && !*jobspec.knowledge) no_knowledge = true;
+        if (!jobspec.output.empty() && output_format == "text")
+            output_format = jobspec.output;
+        if (!jobspec.save.empty() && save_path.empty())     save_path = jobspec.save;
+        if (!jobspec.resume.empty() && resume_path.empty()) resume_path = jobspec.resume;
+        if (!jobspec.cwd.empty() && cwd.empty())            cwd = jobspec.cwd;
+        want_print = true;
+    }
+
     if (!model.empty())   cfg.model = model;
     if (max_turns > 0)    cfg.max_turns = max_turns;
     if (yolo)             cfg.yolo = true;
@@ -210,7 +267,13 @@ int main(int argc, char** argv) {
 
     Client client(cfg);
     ToolRegistry tools;
+    TodoStore todos;
+    static JobManager jobs;      // static: background jobs outlive this scope
+
     tools.add_builtins();
+    tools.add_extra_builtins(&todos);
+    add_job_tools(tools, jobs);
+    web::add_tools(tools, web::SearchConfig::from_env());
 
     // MCP servers contribute additional tools. A server that fails to start is
     // reported and skipped -- it must not prevent ppcode from running.
@@ -236,10 +299,115 @@ int main(int argc, char** argv) {
         agent.set_cwd(getcwd(buf, sizeof(buf)) ? buf : resolved);
     }
 
+    // Assemble the system message: base instructions, this machine's actual
+    // capabilities, and as much platform knowledge as the model's context window
+    // can carry. Probing shells out to sysctl/port and is cached on disk.
+    {
+        envinfo::Probe probe = envinfo::probe(refresh_env);
+
+        ModelCatalog catalog;
+        std::string cat_err;
+        catalog.load(client, &cat_err);
+        const ModelInfo* mi = catalog.find(cfg.model);
+
+        sysprompt::Inputs si;
+        si.cfg = &cfg;
+        si.probe = &probe;
+        si.cwd = agent.cwd();
+        si.model_id = cfg.model;
+        si.context_tokens = mi ? mi->context_length : ModelCatalog::kUnknownContext;
+        si.model_supports_images = mi ? mi->supports_images : false;
+        si.model_supports_tools = mi ? mi->supports_tools : true;
+        si.tool_names = tools.names();
+        si.include_knowledge = !no_knowledge;
+        if (!env_detail_opt.empty()) {
+            bool ok = false;
+            envinfo::Detail d = envinfo::detail_from_string(env_detail_opt, &ok);
+            if (!ok) {
+                std::fprintf(stderr,
+                             "ppcode: --env-detail must be none, minimal, brief, "
+                             "standard, or full\n");
+                return 2;
+            }
+            si.env_detail = d;
+        }
+
+        sysprompt::Result sp = sysprompt::build(si);
+        agent.set_system_prompt(sp.text);
+
+        // --show-context is an explicit request for diagnostics, so -q does not
+        // suppress it.
+        if (show_context) {
+            std::fprintf(stderr,
+                         "context: %zu est. tokens, env=%s, knowledge=[%s]%s\n",
+                         sp.est_tokens,
+                         envinfo::detail_to_string(sp.env_detail).c_str(),
+                         join(sp.included_docs, " ").c_str(),
+                         sp.skipped_docs.empty()
+                             ? ""
+                             : (" skipped=[" + join(sp.skipped_docs, " ") + "]").c_str());
+        }
+    }
+
     if (want_print) {
         HeadlessOptions opt;
         opt.prompt = prompt;
         opt.yolo = cfg.yolo;
+
+        // Attachments come from the job file and from --attach; both need the
+        // model's vision capability to decide how to carry them.
+        if (have_job || !attach_paths.empty()) {
+            job::Spec effective = jobspec;
+            if (!have_job) effective.prompt = prompt;
+            if (effective.cwd.empty()) effective.cwd = agent.cwd();
+            for (const std::string& p : attach_paths)
+                effective.attachments.push_back({p, "auto", "auto", ""});
+
+            ModelCatalog cat2;
+            cat2.load(client, nullptr);
+            const ModelInfo* mi2 = cat2.find(cfg.model);
+            bool vision = mi2 ? mi2->supports_images : false;
+
+            if (!effective.attachments.empty() && !vision && !quiet)
+                std::fprintf(stderr,
+                             "ppcode: %s cannot see images; image attachments will be "
+                             "described rather than shown\n", cfg.model.c_str());
+
+            std::vector<std::string> awarn;
+            Message um = job::build_user_message(effective, vision, &awarn);
+            for (const std::string& w : awarn)
+                std::fprintf(stderr, "ppcode: %s\n", w.c_str());
+            opt.message = um;
+        }
+
+        if (dry_run) {
+            std::printf("model:      %s\n", cfg.model.c_str());
+            if (!cfg.model_fallbacks.empty())
+                std::printf("fallbacks:  %s\n", join(cfg.model_fallbacks, ", ").c_str());
+            if (cfg.provider.is_object() && !cfg.provider.empty())
+                std::printf("provider:   %s\n", cfg.provider.dump().c_str());
+            if (cfg.reasoning.is_object() && !cfg.reasoning.empty())
+                std::printf("reasoning:  %s\n", cfg.reasoning.dump().c_str());
+            std::printf("max_turns:  %d\nmax_tokens: %d\ntemperature: %.2f\n",
+                        cfg.max_turns, cfg.max_tokens, cfg.temperature);
+            std::printf("web_search: %s\n", cfg.web_search ? "on" : "off");
+            std::printf("yolo:       %s\n", cfg.yolo ? "yes" : "no");
+            if (!allow_tools.empty())
+                std::printf("allow:      %s\n", join(allow_tools, ", ").c_str());
+            if (!deny_tools.empty())
+                std::printf("deny:       %s\n", join(deny_tools, ", ").c_str());
+            std::printf("cwd:        %s\n", agent.cwd().c_str());
+            std::printf("output:     %s\n", output_format.c_str());
+            std::printf("tools:      %zu registered\n", tools.size());
+            if (have_job) {
+                std::printf("job:        %s (%s)\n", jobspec.name.c_str(),
+                            jobspec.source_path.c_str());
+                if (!jobspec.attachments.empty())
+                    std::printf("attachments: %zu\n", jobspec.attachments.size());
+                std::printf("\n--- prompt ---\n%s\n", jobspec.prompt.c_str());
+            }
+            return 0;
+        }
         opt.allow_tools = allow_tools;
         opt.deny_tools = deny_tools;
         opt.quiet = quiet;

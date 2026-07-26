@@ -51,6 +51,11 @@ public:
     RunResult run(const std::string& user_input, const Events& ev,
                   std::atomic<bool>* cancel = nullptr);
 
+    // As above, but with a pre-built message -- used when the turn carries
+    // attachments as content parts rather than plain text.
+    RunResult run(const Message& user_message, const Events& ev,
+                  std::atomic<bool>* cancel = nullptr);
+
     // Continue without adding a user message (used after /compact or to resume).
     RunResult run_continuation(const Events& ev, std::atomic<bool>* cancel = nullptr);
 
@@ -58,6 +63,13 @@ public:
     const std::vector<Message>& history() const { return history_; }
 
     void reset();
+
+    // Install a fully assembled system message (see sysprompt::build). Replaces
+    // whatever is at the head of the conversation. When set, this wins over the
+    // config's prompt and no directory line is appended -- the caller owns the
+    // whole text.
+    void set_system_prompt(const std::string& text);
+    const std::string& system_prompt() const { return system_override_; }
 
     // Changing the working directory must also rewrite the system prompt --
     // it names the directory, and a stale value sends the model editing files
@@ -78,6 +90,7 @@ private:
     std::vector<Message> history_;
     std::string cwd_;
     Usage session_usage_;
+    std::string system_override_;
 
     RunResult loop(const Events& ev, std::atomic<bool>* cancel);
     void ensure_system_prompt();

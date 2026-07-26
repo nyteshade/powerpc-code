@@ -14,7 +14,11 @@ enum class OutputFormat {
 };
 
 struct HeadlessOptions {
-    std::string prompt;             // if empty, read stdin
+    std::string prompt;             // if empty, read stdin (unless `message` is set)
+
+    // A pre-built first turn, used for job files with attachments. When set,
+    // `prompt` is ignored and stdin is not read.
+    std::optional<Message> message;
     OutputFormat format = OutputFormat::Text;
     bool yolo = false;
     std::vector<std::string> allow_tools;   // extra tools allowed past the gate

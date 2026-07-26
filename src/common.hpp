@@ -53,6 +53,9 @@ std::string expand_user(const std::string& path);
 bool read_file_text(const std::string& path, std::string* out, std::string* err);
 bool write_file_text(const std::string& path, const std::string& data, std::string* err);
 
+// Standard base64, no line breaks -- for data: URIs.
+std::string base64_encode(const std::string& data);
+
 // Elide the middle of a string so it fits in `max` characters.
 std::string elide(const std::string& s, size_t max);
 

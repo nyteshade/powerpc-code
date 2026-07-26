@@ -14,9 +14,21 @@ Agent::Agent(Client& client, ToolRegistry& tools, const Config& cfg)
 
 void Agent::ensure_system_prompt() {
     if (!history_.empty() && history_.front().role == "system") return;
-    std::string prompt = cfg_.effective_system_prompt();
-    prompt += "\n\nThe working directory is " + cwd_ + ".";
+    std::string prompt;
+    if (!system_override_.empty()) {
+        prompt = system_override_;
+    } else {
+        prompt = cfg_.effective_system_prompt();
+        prompt += "\n\nThe working directory is " + cwd_ + ".";
+    }
     history_.insert(history_.begin(), Message::system_msg(prompt));
+}
+
+void Agent::set_system_prompt(const std::string& text) {
+    system_override_ = text;
+    if (!history_.empty() && history_.front().role == "system")
+        history_.erase(history_.begin());
+    ensure_system_prompt();
 }
 
 void Agent::reset() {
@@ -37,8 +49,13 @@ void Agent::set_cwd(const std::string& cwd) {
 
 Agent::RunResult Agent::run(const std::string& user_input, const Events& ev,
                             std::atomic<bool>* cancel) {
+    return run(Message::user(user_input), ev, cancel);
+}
+
+Agent::RunResult Agent::run(const Message& user_message, const Events& ev,
+                            std::atomic<bool>* cancel) {
     ensure_system_prompt();
-    history_.push_back(Message::user(user_input));
+    history_.push_back(user_message);
     return loop(ev, cancel);
 }
 

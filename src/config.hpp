@@ -27,6 +27,23 @@ struct Config {
     double temperature = 1.0;
     int max_tokens = 8192;
     int max_turns = 40;               // tool-call rounds before forcing a stop
+    double top_p = -1.0;              // negative means "do not send"
+    int seed = -1;                    // negative means "do not send"
+
+    // OpenRouter request fields kept as raw JSON so that new options in their
+    // API work without a code change here. `provider` carries routing
+    // preferences (sort, order, allow_fallbacks, only/ignore, data_collection,
+    // quantizations); `reasoning` carries effort or a thinking-token budget.
+    json provider;
+    json reasoning;
+
+    // Ordered fallback models for OpenRouter's "models" field.
+    std::vector<std::string> model_fallbacks;
+
+    // OpenRouter's own web plugin. Needs no extra credentials, which makes it
+    // the most reliable search option on a machine like this.
+    bool web_search = false;
+    int web_max_results = 5;
 
     // OpenRouter attribution headers (optional but encouraged by their docs).
     std::string referer = "https://github.com/nyteshade/ppcode";

@@ -29,17 +29,20 @@ void emit(const json& j) {
 
 int run_headless(Agent& agent, const Config& cfg, const HeadlessOptions& opt) {
     std::string prompt = opt.prompt;
-    if (prompt.empty()) {
-        if (isatty(STDIN_FILENO)) {
-            std::fprintf(stderr,
-                         "ppcode: no prompt given. Pass -p \"...\" or pipe text on stdin.\n");
+    if (!opt.message) {
+        if (prompt.empty()) {
+            if (isatty(STDIN_FILENO)) {
+                std::fprintf(stderr,
+                             "ppcode: no prompt given. Pass -p \"...\" or pipe text "
+                             "on stdin.\n");
+                return 2;
+            }
+            prompt = trim(read_stdin_all());
+        }
+        if (prompt.empty()) {
+            std::fprintf(stderr, "ppcode: empty prompt\n");
             return 2;
         }
-        prompt = trim(read_stdin_all());
-    }
-    if (prompt.empty()) {
-        std::fprintf(stderr, "ppcode: empty prompt\n");
-        return 2;
     }
 
     if (!opt.resume_path.empty()) {
@@ -141,7 +144,8 @@ int run_headless(Agent& agent, const Config& cfg, const HeadlessOptions& opt) {
     };
 
     std::atomic<bool> cancel{false};
-    Agent::RunResult r = agent.run(prompt, ev, &cancel);
+    Agent::RunResult r = opt.message ? agent.run(*opt.message, ev, &cancel)
+                                     : agent.run(prompt, ev, &cancel);
 
     if (textout && !assistant_text.empty() && assistant_text.back() != '\n')
         std::fputc('\n', stdout);

@@ -1,7 +1,11 @@
 #include "openrouter.hpp"
 #include "http.hpp"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
 
 namespace ppcode {
 
@@ -24,6 +28,45 @@ json ToolCall::args_json(std::string* parse_error) const {
     }
 }
 
+json ContentPart::to_json() const {
+    switch (type) {
+        case Type::ImageUrl: {
+            json img = {{"url", url}};
+            if (!detail.empty() && detail != "auto") img["detail"] = detail;
+            return json{{"type", "image_url"}, {"image_url", img}};
+        }
+        case Type::FileData: {
+            json f = {{"file_data", url}};
+            if (!filename.empty()) f["filename"] = filename;
+            return json{{"type", "file"}, {"file", f}};
+        }
+        case Type::Text:
+        default:
+            return json{{"type", "text"}, {"text", text}};
+    }
+}
+
+std::string Message::display_text() const {
+    if (parts.empty()) return content;
+    std::string out;
+    for (const ContentPart& p : parts) {
+        if (p.type == ContentPart::Type::Text) {
+            if (!out.empty()) out += "\n";
+            out += p.text;
+        } else if (p.type == ContentPart::Type::ImageUrl) {
+            if (!out.empty()) out += "\n";
+            // A data: URI is megabytes of base64; never show it.
+            out += starts_with(p.url, "data:")
+                       ? "[image: " + (p.mime.empty() ? "embedded" : p.mime) + "]"
+                       : "[image: " + p.url + "]";
+        } else {
+            if (!out.empty()) out += "\n";
+            out += "[file: " + (p.filename.empty() ? "attached" : p.filename) + "]";
+        }
+    }
+    return out;
+}
+
 json Message::to_json() const {
     json m;
     m["role"] = role;
@@ -32,6 +75,25 @@ json Message::to_json() const {
         m["content"] = content;
         m["tool_call_id"] = tool_call_id;
         if (!name.empty()) m["name"] = name;
+        return m;
+    }
+
+    if (!parts.empty()) {
+        json arr = json::array();
+        for (const ContentPart& p : parts) arr.push_back(p.to_json());
+        m["content"] = arr;
+        if (!tool_calls.empty()) {
+            json tarr = json::array();
+            for (const ToolCall& tc : tool_calls) {
+                json c;
+                c["id"] = tc.id;
+                c["type"] = "function";
+                c["function"] = {{"name", tc.name},
+                                 {"arguments", tc.arguments.empty() ? "{}" : tc.arguments}};
+                tarr.push_back(c);
+            }
+            m["tool_calls"] = tarr;
+        }
         return m;
     }
 
@@ -204,9 +266,30 @@ json Client::build_request(const std::vector<Message>& messages,
     for (const Message& m : messages) msgs.push_back(m.to_json());
     req["messages"] = msgs;
 
+    if (!cfg_.model_fallbacks.empty()) {
+        // OpenRouter tries these in order if the primary model is unavailable.
+        json alts = json::array();
+        alts.push_back(cfg_.model);
+        for (const std::string& m : cfg_.model_fallbacks) alts.push_back(m);
+        req["models"] = alts;
+    }
+
     req["stream"] = stream;
     if (cfg_.max_tokens > 0)   req["max_tokens"] = cfg_.max_tokens;
     if (cfg_.temperature >= 0) req["temperature"] = cfg_.temperature;
+    if (cfg_.top_p > 0)        req["top_p"] = cfg_.top_p;
+    if (cfg_.seed >= 0)        req["seed"] = cfg_.seed;
+
+    if (cfg_.provider.is_object() && !cfg_.provider.empty())
+        req["provider"] = cfg_.provider;
+    if (cfg_.reasoning.is_object() && !cfg_.reasoning.empty())
+        req["reasoning"] = cfg_.reasoning;
+
+    if (cfg_.web_search) {
+        json plugin = {{"id", "web"}};
+        if (cfg_.web_max_results > 0) plugin["max_results"] = cfg_.web_max_results;
+        req["plugins"] = json::array({plugin});
+    }
 
     if (!tools.empty()) {
         json arr = json::array();
@@ -397,15 +480,228 @@ std::vector<ModelInfo> Client::list_models(std::string* error) {
                 mi.prompt_cost     = std::atof(jstr(*p, "prompt", "0").c_str());
                 mi.completion_cost = std::atof(jstr(*p, "completion", "0").c_str());
             }
+            mi.description = jstr(m, "description");
+            if (const json* tp = jptr(m, "top_provider"))
+                mi.max_completion_tokens = jint(*tp, "max_completion_tokens");
+
             if (const json* sp = jptr(m, "supported_parameters"); sp && sp->is_array()) {
-                for (const json& s : *sp)
-                    if (s.is_string() && s.get<std::string>() == "tools")
+                for (const json& s : *sp) {
+                    if (!s.is_string()) continue;
+                    std::string param = s.get<std::string>();
+                    if (param == "tools" || param == "tool_choice")
                         mi.supports_tools = true;
+                    else if (param == "reasoning" || param == "include_reasoning")
+                        mi.supports_reasoning = true;
+                }
+            }
+            // Input modalities live under architecture; older payloads used a
+            // bare "modality" string like "text+image->text".
+            if (const json* arch = jptr(m, "architecture")) {
+                if (const json* im = jptr(*arch, "input_modalities");
+                    im && im->is_array()) {
+                    for (const json& s : *im) {
+                        if (!s.is_string()) continue;
+                        std::string mod = s.get<std::string>();
+                        mi.input_modalities.push_back(mod);
+                        if (mod == "image") mi.supports_images = true;
+                        if (mod == "audio") mi.supports_audio = true;
+                    }
+                }
+                if (mi.input_modalities.empty()) {
+                    std::string modality = jstr(*arch, "modality");
+                    if (modality.find("image") != std::string::npos) {
+                        mi.supports_images = true;
+                        mi.input_modalities = {"text", "image"};
+                    } else if (!modality.empty()) {
+                        mi.input_modalities = {"text"};
+                    }
+                }
             }
             out.push_back(std::move(mi));
         }
     } catch (const std::exception& e) {
         if (error) *error = e.what();
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// ModelCatalog
+// ---------------------------------------------------------------------------
+
+const std::vector<std::string>& favorite_models() {
+    // Ordered by ascending capability and cost, per the user's stated
+    // preference, with the Anthropic default first since it is the built-in.
+    static const std::vector<std::string> favs = {
+        "anthropic/claude-sonnet-5",
+        "deepseek/deepseek-v4-pro",
+        "z-ai/glm-5.2",
+        "moonshotai/kimi-k3",
+    };
+    return favs;
+}
+
+std::string ModelCatalog::cache_path() {
+    if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
+        return std::string(xdg) + "/ppcode/models.json";
+    if (const char* home = std::getenv("HOME"); home && *home)
+        return std::string(home) + "/.cache/ppcode/models.json";
+    return "/tmp/ppcode-models.json";
+}
+
+void ModelCatalog::reindex() {
+    by_id_.clear();
+    for (size_t i = 0; i < models_.size(); i++) by_id_[models_[i].id] = i;
+}
+
+bool ModelCatalog::read_cache(int64_t max_age_s) {
+    std::string text;
+    if (!read_file_text(cache_path(), &text, nullptr)) return false;
+    try {
+        json j = json::parse(text);
+        int64_t stamp = jint(j, "fetched_at");
+        int64_t now = static_cast<int64_t>(std::time(nullptr));
+        if (max_age_s > 0 && (now - stamp) > max_age_s) return false;
+
+        const json* arr = jptr(j, "models");
+        if (!arr || !arr->is_array()) return false;
+
+        models_.clear();
+        for (const json& m : *arr) {
+            ModelInfo mi;
+            mi.id = jstr(m, "id");
+            if (mi.id.empty()) continue;
+            mi.name = jstr(m, "name", mi.id);
+            mi.context_length = jint(m, "context_length");
+            mi.max_completion_tokens = jint(m, "max_completion_tokens");
+            mi.prompt_cost = jnum(m, "prompt_cost");
+            mi.completion_cost = jnum(m, "completion_cost");
+            mi.supports_tools = jbool(m, "supports_tools");
+            mi.supports_reasoning = jbool(m, "supports_reasoning");
+            mi.supports_images = jbool(m, "supports_images");
+            mi.supports_audio = jbool(m, "supports_audio");
+            if (const json* im = jptr(m, "input_modalities"); im && im->is_array())
+                for (const json& s : *im)
+                    if (s.is_string()) mi.input_modalities.push_back(s.get<std::string>());
+            models_.push_back(std::move(mi));
+        }
+        reindex();
+        return !models_.empty();
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+void ModelCatalog::write_cache() const {
+    json arr = json::array();
+    for (const ModelInfo& m : models_) {
+        arr.push_back({{"id", m.id},
+                       {"name", m.name},
+                       {"context_length", m.context_length},
+                       {"max_completion_tokens", m.max_completion_tokens},
+                       {"prompt_cost", m.prompt_cost},
+                       {"completion_cost", m.completion_cost},
+                       {"supports_tools", m.supports_tools},
+                       {"supports_reasoning", m.supports_reasoning},
+                       {"supports_images", m.supports_images},
+                       {"supports_audio", m.supports_audio},
+                       {"input_modalities", m.input_modalities}});
+    }
+    json j;
+    j["fetched_at"] = static_cast<int64_t>(std::time(nullptr));
+    j["models"] = arr;
+
+    std::string path = cache_path();
+    std::error_code ec;
+    std::filesystem::path p(path);
+    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    std::string err;
+    if (!write_file_text(path, j.dump(), &err))
+        log_line("model catalog: could not cache: " + err);
+}
+
+bool ModelCatalog::load(Client& client, std::string* error, bool force_refresh,
+                        int64_t max_age_s) {
+    if (!force_refresh && read_cache(max_age_s)) return true;
+
+    std::string err;
+    std::vector<ModelInfo> fetched = client.list_models(&err);
+    if (fetched.empty()) {
+        // A stale cache beats nothing at all when the network is down.
+        if (read_cache(0)) {
+            log_line("model catalog: fetch failed, using stale cache: " + err);
+            return true;
+        }
+        if (error) *error = err.empty() ? "no models returned" : err;
+        return false;
+    }
+    models_ = std::move(fetched);
+    reindex();
+    write_cache();
+    return true;
+}
+
+const ModelInfo* ModelCatalog::find(const std::string& id) const {
+    auto it = by_id_.find(id);
+    if (it != by_id_.end()) return &models_[it->second];
+
+    // OpenRouter accepts suffixes like ":online", ":free" and ":nitro" that are
+    // routing hints rather than distinct models; fall back to the base id.
+    size_t colon = id.find(':');
+    if (colon != std::string::npos) {
+        auto base = by_id_.find(id.substr(0, colon));
+        if (base != by_id_.end()) return &models_[base->second];
+    }
+    return nullptr;
+}
+
+int64_t ModelCatalog::context_for(const std::string& id) const {
+    const ModelInfo* m = find(id);
+    if (m && m->context_length > 0) return m->context_length;
+    return kUnknownContext;
+}
+
+std::vector<const ModelInfo*> ModelCatalog::search(const std::string& query,
+                                                   size_t limit) const {
+    std::string q = to_lower(trim(query));
+    std::vector<std::pair<int, const ModelInfo*>> scored;
+
+    for (const ModelInfo& m : models_) {
+        if (q.empty()) {
+            scored.emplace_back(0, &m);
+            continue;
+        }
+        std::string lid = to_lower(m.id);
+        std::string lname = to_lower(m.name);
+
+        int score;
+        if (lid == q)                                     score = 0;
+        else if (starts_with(lid, q))                     score = 1;
+        else if (lid.find('/') != std::string::npos &&
+                 starts_with(lid.substr(lid.find('/') + 1), q)) score = 2;
+        else if (lid.find(q) != std::string::npos)        score = 3;
+        else if (lname.find(q) != std::string::npos)      score = 4;
+        else {
+            // Match on all whitespace-separated terms in any order.
+            bool all = true;
+            for (const std::string& term : split(q, ' ')) {
+                if (term.empty()) continue;
+                if (lid.find(term) == std::string::npos &&
+                    lname.find(term) == std::string::npos) { all = false; break; }
+            }
+            if (!all) continue;
+            score = 5;
+        }
+        scored.emplace_back(score, &m);
+    }
+
+    std::stable_sort(scored.begin(), scored.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    std::vector<const ModelInfo*> out;
+    for (const auto& [s, m] : scored) {
+        out.push_back(m);
+        if (out.size() >= limit) break;
     }
     return out;
 }

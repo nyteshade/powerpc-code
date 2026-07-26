@@ -5,6 +5,7 @@
 #include "openrouter.hpp"
 
 #include <atomic>
+#include <mutex>
 
 namespace ppcode {
 
@@ -49,10 +50,33 @@ struct Tool {
     std::string source;    // "builtin" or "mcp:<server>"
 };
 
+// A plan the model maintains across turns. Long builds on this hardware span
+// many rounds, and a visible checklist is the difference between the model
+// keeping its place and starting over.
+struct TodoItem {
+    std::string text;
+    std::string status = "pending";   // pending | in_progress | completed
+};
+
+class TodoStore {
+public:
+    void replace(std::vector<TodoItem> items);
+    std::vector<TodoItem> items() const;
+    bool empty() const;
+    std::string summary() const;      // "2/5 done"
+private:
+    mutable std::mutex mu_;
+    std::vector<TodoItem> items_;
+};
+
 class ToolRegistry {
 public:
     void add(Tool t);
     void add_builtins();
+
+    // multi_edit, read_many_files, file operations, and the todo list.
+    // `todos` may be null to omit the todo tool.
+    void add_extra_builtins(TodoStore* todos);
 
     bool has(const std::string& name) const;
     const Tool* find(const std::string& name) const;

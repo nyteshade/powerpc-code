@@ -24,21 +24,68 @@ struct ToolCall {
     json args_json(std::string* parse_error = nullptr) const;
 };
 
+// A piece of a multi-part message. Text-only messages do not need these -- they
+// exist so that images and file contents can travel alongside a prompt for
+// models that accept them.
+struct ContentPart {
+    enum class Type { Text, ImageUrl, FileData };
+
+    Type type = Type::Text;
+    std::string text;        // Type::Text
+    std::string url;         // Type::ImageUrl -- http(s):// or a data: URI
+    std::string detail;      // Type::ImageUrl -- "auto" | "low" | "high"
+    std::string filename;    // Type::FileData
+    std::string mime;
+
+    json to_json() const;
+
+    static ContentPart make_text(const std::string& t) {
+        ContentPart p;
+        p.type = Type::Text;
+        p.text = t;
+        return p;
+    }
+    static ContentPart make_image(const std::string& url,
+                                  const std::string& detail = "auto") {
+        ContentPart p;
+        p.type = Type::ImageUrl;
+        p.url = url;
+        p.detail = detail;
+        return p;
+    }
+};
+
 struct Message {
     std::string role;                  // "system" | "user" | "assistant" | "tool"
     std::string content;
+    std::vector<ContentPart> parts;    // when non-empty, sent instead of content
     std::vector<ToolCall> tool_calls;  // assistant turns that call tools
     std::string tool_call_id;          // required on "tool" turns
     std::string name;                  // tool name, for readability
 
     json to_json() const;
 
-    static Message system_msg(const std::string& c)    { return {"system", c, {}, "", ""}; }
-    static Message user(const std::string& c)          { return {"user", c, {}, "", ""}; }
-    static Message assistant(const std::string& c)     { return {"assistant", c, {}, "", ""}; }
+    // Text of the message regardless of how it is carried, for display and for
+    // saving sessions.
+    std::string display_text() const;
+
+    static Message system_msg(const std::string& c) {
+        Message m; m.role = "system"; m.content = c; return m;
+    }
+    static Message user(const std::string& c) {
+        Message m; m.role = "user"; m.content = c; return m;
+    }
+    static Message assistant(const std::string& c) {
+        Message m; m.role = "assistant"; m.content = c; return m;
+    }
     static Message tool_result(const std::string& call_id, const std::string& tool_name,
                                const std::string& content) {
-        return {"tool", content, {}, call_id, tool_name};
+        Message m;
+        m.role = "tool";
+        m.content = content;
+        m.tool_call_id = call_id;
+        m.name = tool_name;
+        return m;
     }
 };
 
@@ -85,10 +132,66 @@ struct ModelInfo {
     std::string id;
     std::string name;
     int64_t context_length = 0;
+    int64_t max_completion_tokens = 0;
     double prompt_cost = 0.0;      // USD per token
     double completion_cost = 0.0;
     bool supports_tools = false;
+    bool supports_reasoning = false;
+    bool supports_images = false;      // "image" among input modalities
+    bool supports_audio = false;
+    std::vector<std::string> input_modalities;
+    std::string description;
+
+    // Cost of a nominal exchange, for ranking cheap vs expensive in the picker.
+    double blended_cost_per_mtok() const {
+        return (prompt_cost * 0.75 + completion_cost * 0.25) * 1e6;
+    }
 };
+
+class Client;   // defined below; ModelCatalog only needs a reference
+
+// Cached lookup of the /models catalogue. The list is ~350 entries and changes
+// rarely, so fetching it on every run would be a needless round trip on a slow
+// machine.
+class ModelCatalog {
+public:
+    // Loads from disk cache if it is present and younger than `max_age_s`,
+    // otherwise fetches. Returns false only if both fail.
+    bool load(Client& client, std::string* error, bool force_refresh = false,
+              int64_t max_age_s = 24 * 3600);
+
+    // Metadata for one id. Returns null when unknown (an id the user typed, or
+    // a catalogue we could not fetch).
+    const ModelInfo* find(const std::string& id) const;
+
+    const std::vector<ModelInfo>& all() const { return models_; }
+    bool empty() const { return models_.empty(); }
+
+    // Substring match over id and name, ranked so that exact and prefix
+    // matches come first.
+    std::vector<const ModelInfo*> search(const std::string& query,
+                                         size_t limit = 200) const;
+
+    static std::string cache_path();
+
+    // Context window to assume when the catalogue has no entry for a model.
+    static constexpr int64_t kUnknownContext = 128000;
+
+    // Effective context for an id, falling back to kUnknownContext.
+    int64_t context_for(const std::string& id) const;
+
+private:
+    std::vector<ModelInfo> models_;
+    std::map<std::string, size_t> by_id_;
+
+    void reindex();
+    bool read_cache(int64_t max_age_s);
+    void write_cache() const;
+};
+
+// Model ids worth putting in front of the user rather than making them recall.
+// Ordered deliberately: ascending capability and cost.
+const std::vector<std::string>& favorite_models();
 
 // ---------------------------------------------------------------------------
 // Client
