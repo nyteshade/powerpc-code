@@ -17,6 +17,7 @@
 #include "sysprompt.hpp"
 #include "webtools.hpp"
 #include "xcodeproj.hpp"
+#include "xib.hpp"
 #include "selftest.hpp"
 #include "tools.hpp"
 #include "ui.hpp"
@@ -362,6 +363,7 @@ int main(int argc, char** argv) {
     xcode::add_tools(tools);
     if (appledocs::available()) appledocs::add_tools(tools);
     builderr::add_tools(tools);
+    xib::add_tools(tools);
 
     // Screenshot tooling is only worth advertising if there is a screen to
     // capture. Whether the model can actually see the result changes the tool's

@@ -18,6 +18,7 @@
 #include "tools.hpp"
 #include "webtools.hpp"
 #include "xcodeproj.hpp"
+#include "xib.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -121,6 +122,7 @@ struct BridgeState {
     web::add_tools(st->tools, web::SearchConfig::from_env());
     xcode::add_tools(st->tools);
     builderr::add_tools(st->tools);
+    xib::add_tools(st->tools);
     if (appledocs::available()) appledocs::add_tools(st->tools);
 
     if (!st->cfg.mcp_servers.empty())

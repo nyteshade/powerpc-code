@@ -22,6 +22,8 @@
 #include "xcodeproj.hpp"
 #include "utf8.hpp"
 #include "webtools.hpp"
+#include "xib.hpp"
+#include "xml.hpp"
 #include "yaml.hpp"
 
 #include <cstdio>
@@ -796,6 +798,169 @@ void test_web() {
     }
 }
 
+void test_xml() {
+    std::printf("[xml]\n");
+    const std::string src =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<archive type=\"com.apple.InterfaceBuilder3.Cocoa.XIB\" version=\"7.02\">\n"
+        "\t<data>\n"
+        "\t\t<int key=\"IBDocument.SystemTarget\">1050</int>\n"
+        "\t\t<string key=\"IBDocument.SystemVersion\">9D29</string>\n"
+        "\t\t<object class=\"NSMutableArray\" key=\"IBDocument.RootObjects\" id=\"1048\">\n"
+        "\t\t\t<bool key=\"EncodedWithXMLCoder\">YES</bool>\n"
+        "\t\t\t<object class=\"NSCustomObject\" id=\"1021\">\n"
+        "\t\t\t\t<string key=\"NSClassName\">NSApplication</string>\n"
+        "\t\t\t</object>\n"
+        "\t\t\t<object class=\"NSWindowTemplate\" id=\"77\">\n"
+        "\t\t\t\t<string key=\"NSWindowTitle\">Sample &amp; Friends</string>\n"
+        "\t\t\t\t<reference key=\"NSWindowView\" ref=\"1021\"/>\n"
+        "\t\t\t</object>\n"
+        "\t\t</object>\n"
+        "\t</data>\n"
+        "</archive>\n";
+
+    xml::Document d;
+    std::string err;
+    check(xml::parse(src, &d, &err), "xib-shaped xml parses" +
+                                         (err.empty() ? "" : ": " + err));
+    if (!d.root) return;
+    check(d.root->name == "archive", "root element");
+    check(d.root->attr("version") == "7.02", "attribute read");
+    check(starts_with(d.declaration, "<?xml"), "declaration preserved");
+
+    xml::NodePtr data = d.root->first_child("data");
+    check(data != nullptr, "child lookup by name");
+    if (data) {
+        std::vector<xml::NodePtr> ints = data->find_children("int");
+        check(ints.size() == 1 && ints[0]->inner_text() == "1050", "inner text");
+    }
+    check(d.root->find_all("object").size() == 3, "recursive find_all");
+    check(d.root->find_all_with_attr("object", "class", "NSWindowTemplate").size() == 1,
+          "find by attribute");
+
+    // Entities must survive a round trip, or a window title with an ampersand
+    // silently corrupts the nib.
+    {
+        std::vector<xml::NodePtr> w =
+            d.root->find_all_with_attr("object", "id", "77");
+        check(!w.empty(), "found the window object");
+        if (!w.empty()) {
+            xml::NodePtr title = w[0]->first_child("string");
+            check(title && title->inner_text() == "Sample & Friends",
+                  "entity decoded on read");
+        }
+    }
+    {
+        std::string out = xml::serialize(d, true);
+        check(out.find("&amp;") != std::string::npos, "entity re-escaped on write");
+        xml::Document again;
+        std::string e2;
+        check(xml::parse(out, &again, &e2), "round trip re-parses");
+        if (again.root)
+            check(again.root->find_all("object").size() == 3,
+                  "round trip preserves the object count");
+    }
+
+    check(xml::escape("a<b>&c") == "a&lt;b&gt;&amp;c", "escape");
+    check(xml::unescape("a&lt;b&gt;&amp;c&#65;") == "a<b>&cA", "unescape incl numeric");
+
+    {
+        xml::Document bad;
+        std::string e;
+        check(!xml::parse("<a><b></a>", &bad, &e), "mismatched tags rejected");
+        check(e.find("line") != std::string::npos, "error names a line");
+    }
+}
+
+void test_xib() {
+    std::printf("[xib]\n");
+
+    // Prefer the real nib from the Sample project; it is the actual format.
+    std::string real = expand_user("~/Desktop/Sample/English.lproj/MainMenu.xib");
+    std::error_code ec;
+    if (!fs::exists(real, ec)) {
+        std::printf("  skip  no MainMenu.xib available to test against\n");
+        return;
+    }
+
+    std::string work = "/tmp/ppcode-xib/MainMenu.xib";
+    fs::remove_all("/tmp/ppcode-xib");
+    fs::create_directories("/tmp/ppcode-xib");
+    fs::copy_file(real, work, ec);
+    check(!ec, "copied the real nib to a scratch directory");
+
+    xib::Document d;
+    std::string err;
+    check(d.load(work, &err), "real nib loads" + (err.empty() ? "" : ": " + err));
+
+    check(!d.format_version().empty(), "archive version read");
+    check(d.system_target() == "1050", "deployment target is 10.5");
+
+    std::vector<xib::ObjectNode> objs = d.objects();
+    check(objs.size() > 100, "object graph parsed (" +
+                                 std::to_string(objs.size()) + " objects)");
+    bool has_menu = false, has_app = false;
+    for (const xib::ObjectNode& o : objs) {
+        if (o.cls == "NSMenu") has_menu = true;
+        if (o.cls == "NSCustomObject") has_app = true;
+    }
+    check(has_menu, "found the menu bar");
+    check(has_app, "found the File's Owner / application objects");
+
+    std::string desc = d.describe(false);
+    check(desc.find("NSMenu") != std::string::npos, "description names classes");
+    check(desc.find("objects") != std::string::npos, "description counts objects");
+
+    // Declaring a class is the safe edit; it must survive a save and reload.
+    xib::ClassDescription cd;
+    cd.name = "PPTestController";
+    cd.superclass = "NSObject";
+    cd.source_file = "PPTestController.h";
+    cd.outlets.push_back({"window", "NSWindow"});
+    cd.outlets.push_back({"statusField", "NSTextField"});
+    cd.actions.push_back("doThing");
+
+    check(d.add_class(cd, &err), "class declared" + (err.empty() ? "" : ": " + err));
+    check(d.save(&err), "nib saved" + (err.empty() ? "" : ": " + err));
+    check(fs::exists(work + ".ppcode-bak"), "a backup was written");
+
+    xib::Document d2;
+    check(d2.load(work, &err), "modified nib reloads (still well-formed)");
+    bool found = false;
+    for (const xib::ClassDescription& c : d2.classes()) {
+        if (c.name != "PPTestController") continue;
+        found = true;
+        check(c.superclass == "NSObject", "superclass survived");
+        check(c.outlets.size() == 2, "outlets survived");
+        check(c.actions.size() == 1, "actions survived");
+        bool win = false;
+        for (const auto& [n, t] : c.outlets)
+            if (n == "window" && t == "NSWindow") win = true;
+        check(win, "outlet name and type survived");
+    }
+    check(found, "declared class is present after reload");
+
+    // Declaring twice must replace, not duplicate.
+    check(d2.add_class(cd, &err), "re-declaring the same class succeeds");
+    int count = 0;
+    for (const xib::ClassDescription& c : d2.classes())
+        if (c.name == "PPTestController") count++;
+    check(count == 1, "re-declaring replaces rather than duplicating");
+
+    check(d2.remove_class("PPTestController", &err), "class can be removed");
+    check(!d2.remove_class("NoSuchClass", &err), "removing an unknown class fails cleanly");
+
+    // A compiled nib must be refused rather than mangled.
+    {
+        xib::Document nib;
+        std::string e;
+        check(!nib.load("/tmp/ppcode-xib/whatever.nib", &e), "compiled .nib refused");
+        check(e.find("compiled") != std::string::npos, "and says why");
+    }
+
+    fs::remove_all("/tmp/ppcode-xib");
+}
+
 void test_checkpoint() {
     std::printf("[checkpoint / diff]\n");
 
@@ -1396,6 +1561,8 @@ int run_selftest(bool with_network) {
     test_render();
     test_web();
     test_plist_and_xcode();
+    test_xml();
+    test_xib();
     test_checkpoint();
     test_session();
     test_builderr();
