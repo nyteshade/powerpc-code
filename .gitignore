@@ -1,0 +1,8 @@
+build/
+*.o
+*.d
+*.gch
+
+# Probe cache and saved sessions
+.ppcode-cache.json
+*.session.json
