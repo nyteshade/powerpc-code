@@ -6,6 +6,7 @@
 #include "agent.hpp"
 #include "appledocs.hpp"
 #include "builderr.hpp"
+#include "bundler.hpp"
 #include "checkpoint.hpp"
 #include "attach.hpp"
 #include "common.hpp"
@@ -798,6 +799,100 @@ void test_web() {
     }
 }
 
+void test_bundler() {
+    std::printf("[bundler]\n");
+
+    // Use the running binary: it is a real Mach-O with real MacPorts deps.
+    std::string self = "build/ppcode";
+    std::error_code ec;
+    if (!fs::exists(self, ec)) {
+        std::printf("  skip  build/ppcode not present\n");
+        return;
+    }
+
+    std::vector<bundle::DylibRef> deps = bundle::dependencies(self);
+    check(!deps.empty(), "otool dependencies parsed (" +
+                             std::to_string(deps.size()) + ")");
+    bool sys = false, ports = false;
+    for (const bundle::DylibRef& d : deps) {
+        if (d.is_system) sys = true;
+        if (starts_with(d.path, "/opt/local")) ports = true;
+        check(d.path.find('(') == std::string::npos,
+              "dependency path has no version suffix");
+        break;   // one representative check is enough
+    }
+    for (const bundle::DylibRef& d : deps) {
+        if (d.is_system) sys = true;
+        if (starts_with(d.path, "/opt/local")) ports = true;
+    }
+    check(sys, "system libraries identified as system");
+    check(ports, "MacPorts libraries found");
+
+    check(bundle::dependencies("/does/not/exist").empty(),
+          "missing binary yields no dependencies");
+
+    // A dry run must report the transitive set without touching anything.
+    {
+        std::string dest = "/tmp/ppcode-bundle-dry";
+        fs::remove_all(dest);
+        bundle::RelocateResult r =
+            bundle::relocate(self, dest, "@loader_path/../Frameworks",
+                             {"/opt/local"}, /*dry_run=*/true);
+        check(r.ok, "dry run succeeds");
+        check(!fs::exists(dest, ec), "dry run created nothing");
+        check(r.report.find("dry run") != std::string::npos, "dry run says so");
+        // Transitive: libssl/libcrypto are reached only through libcurl.
+        check(r.report.find("libcrypto") != std::string::npos,
+              "transitive dependency discovered");
+    }
+
+    // Bundle assembly, without relocation so the test stays fast.
+    {
+        std::string app = "/tmp/ppcode-bundle-test/Demo.app";
+        fs::remove_all("/tmp/ppcode-bundle-test");
+
+        bundle::BundleSpec spec;
+        spec.app_path = app;
+        spec.executable = self;
+        spec.name = "Demo";
+        spec.identifier = "test.demo";
+        spec.version = "2.5";
+        spec.relocate_libs = false;
+
+        bundle::BundleResult r = bundle::make_bundle(spec);
+        check(r.ok, "bundle created" + (r.error.empty() ? "" : ": " + r.error));
+        check(fs::exists(app + "/Contents/MacOS/ppcode", ec), "executable copied");
+        check(fs::exists(app + "/Contents/Info.plist", ec), "Info.plist written");
+        check(fs::exists(app + "/Contents/PkgInfo", ec), "PkgInfo written");
+
+        std::string plist;
+        read_file_text(app + "/Contents/Info.plist", &plist, nullptr);
+        check(plist.find("<string>Demo</string>") != std::string::npos,
+              "bundle name in Info.plist");
+        check(plist.find("test.demo") != std::string::npos, "identifier in Info.plist");
+        check(plist.find("<string>2.5</string>") != std::string::npos,
+              "version in Info.plist");
+        check(plist.find("LSMinimumSystemVersion") != std::string::npos,
+              "minimum system version set");
+        check(plist.find("CFBundleExecutable") != std::string::npos,
+              "executable named");
+
+        // The plist must be well-formed, or the Finder will not launch it.
+        xml::Document pd;
+        std::string perr;
+        check(xml::parse(plist, &pd, &perr), "Info.plist is well-formed XML");
+
+        fs::remove_all("/tmp/ppcode-bundle-test");
+    }
+
+    {
+        bundle::BundleSpec bad;
+        bad.app_path = "/tmp/x.app";
+        bad.executable = "/does/not/exist";
+        check(!bundle::make_bundle(bad).ok, "missing executable is refused");
+    }
+}
+
 void test_xml() {
     std::printf("[xml]\n");
     const std::string src =
@@ -1561,6 +1656,7 @@ int run_selftest(bool with_network) {
     test_render();
     test_web();
     test_plist_and_xcode();
+    test_bundler();
     test_xml();
     test_xib();
     test_checkpoint();

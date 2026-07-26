@@ -2,6 +2,7 @@
 #include "agent.hpp"
 #include "appledocs.hpp"
 #include "builderr.hpp"
+#include "bundler.hpp"
 #include "common.hpp"
 #include "config.hpp"
 #include "envinfo.hpp"
@@ -364,6 +365,7 @@ int main(int argc, char** argv) {
     if (appledocs::available()) appledocs::add_tools(tools);
     builderr::add_tools(tools);
     xib::add_tools(tools);
+    bundle::add_tools(tools);
 
     // Screenshot tooling is only worth advertising if there is a screen to
     // capture. Whether the model can actually see the result changes the tool's

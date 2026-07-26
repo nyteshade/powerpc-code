@@ -4,6 +4,7 @@
 #include "appledocs.hpp"
 #include "attach.hpp"
 #include "builderr.hpp"
+#include "bundler.hpp"
 #include "config.hpp"
 #include "envinfo.hpp"
 #include "http.hpp"
@@ -123,6 +124,7 @@ struct BridgeState {
     xcode::add_tools(st->tools);
     builderr::add_tools(st->tools);
     xib::add_tools(st->tools);
+    bundle::add_tools(st->tools);
     if (appledocs::available()) appledocs::add_tools(st->tools);
 
     if (!st->cfg.mcp_servers.empty())
