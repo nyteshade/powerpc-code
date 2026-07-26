@@ -80,6 +80,10 @@ struct BridgeState;
 
 - (NSString *)modelId;
 - (void)setModelId:(NSString *)mid;
+
+// The system message currently in force. Exposed so --check can prove that
+// changing the model actually rebuilds it, which is otherwise invisible.
+- (NSString *)systemPrompt;
 - (NSArray *)availableModels;      // array of NSDictionary
 - (NSArray *)favouriteModelIds;
 

@@ -31,6 +31,8 @@
 }
 - (NSArray *)attachments;
 - (void)clearAttachments;
+- (void)removeAttachmentAtIndex:(NSUInteger)i;
+- (void)addAttachment:(NSString *)path;
 - (void)setDropTarget:(id)t;
 @end
 
@@ -50,6 +52,14 @@
 
 - (NSArray *)attachments { return attachments; }
 - (void)clearAttachments { [attachments removeAllObjects]; }
+
+- (void)removeAttachmentAtIndex:(NSUInteger)i {
+  if (i < [attachments count]) { [attachments removeObjectAtIndex:i]; }
+}
+
+// Only --shot uses this; a real attachment arrives by drag and drop.
+- (void)addAttachment:(NSString *)path { [attachments addObject:path]; }
+
 - (void)setDropTarget:(id)t { dropTarget = t; }
 
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
@@ -159,6 +169,68 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   return well;
 }
 
+// A row of attachment tokens, each removable.
+//
+// This replaces a label that said "2 attachments", which told you the count and
+// nothing else: not which files, and not how to drop one you added by mistake
+// short of clearing the composer.
+@interface PPTokenRow : NSView {
+  id target;
+}
+
+- (void)setPaths:(NSArray *)paths target:(id)t action:(SEL)action;
+
+@end
+
+@implementation PPTokenRow
+
+// Rebuilt rather than diffed. A handful of tokens on a machine this size is not
+// worth the bookkeeping of keeping views in sync.
+- (void)setPaths:(NSArray *)paths target:(id)t action:(SEL)action {
+  target = t;
+
+  NSArray *old = [[[self subviews] copy] autorelease];
+  NSEnumerator *oe = [old objectEnumerator];
+  NSView *v;
+  while ((v = [oe nextObject]) != nil) [v removeFromSuperview];
+
+  CGFloat x = 0.0;
+  for (NSUInteger i = 0; i < [paths count]; i++) {
+    NSString *path = [paths objectAtIndex:i];
+    NSString *name = [path lastPathComponent];
+    if ([name length] > 22) {
+      name = [[name substringToIndex:20] stringByAppendingString:PPUTF8("\xE2\x80\xA6")];
+    }
+
+    // The multiplication sign, not a letter x: it is the right glyph and it is
+    // in every font this platform ships.
+    NSString *title =
+        [name stringByAppendingString:PPUTF8("  \xC3\x97")];
+
+    NSButton *b = [[[NSButton alloc]
+        initWithFrame:NSMakeRect(x, 1, 0, 20)] autorelease];
+    [b setTitle:title];
+    [b setBezelStyle:NSRecessedBezelStyle];
+    [b setFont:[NSFont systemFontOfSize:10.0]];
+    [b setTag:(NSInteger)i];
+    [b setTarget:target];
+    [b setAction:action];
+    [b setToolTip:[path stringByAppendingString:@"  (click to remove)"]];
+    [b sizeToFit];
+
+    NSRect f = [b frame];
+    f.origin.x = x;
+    f.origin.y = 1;
+    f.size.height = 20;
+    [b setFrame:f];
+    [self addSubview:b];
+
+    x += f.size.width + 5.0;
+  }
+}
+
+@end
+
 // The header band: leather with the name blocked into it, the way a title is
 // stamped on a cover.
 @interface PPTitleView : PPLeatherView
@@ -199,7 +271,11 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   NSTableView *sessionTable;
   NSArray *sessions;
   NSTextField *statusField;
-  NSTextField *attachField;
+  // The attachment strip, and the pieces whose frames it pushes around when it
+  // appears and disappears.
+  PPTokenRow *attachRow;
+  NSScrollView *compScroll;
+  NSView *compWell;
   NSPopUpButton *modelPopup;
   NSProgressIndicator *spinner;
   NSButton *sendButton;
@@ -215,6 +291,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 }
 - (void)send:(id)sender;
 - (void)attachmentsChanged;
+- (void)removeAttachment:(id)sender;
 - (void)showSettings:(id)sender;
 - (void)newConversation:(id)sender;
 - (void)clearTranscript;
@@ -454,7 +531,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
       WrapInPaperWell(transScroll, NSMakeRect(0, 0, 720, 440),
                       NSViewWidthSizable | NSViewHeightSizable, YES);
 
-  NSScrollView *compScroll =
+  compScroll =
       [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 700, 110)] autorelease];
   [compScroll setHasVerticalScroller:YES];
   [compScroll setBorderType:NSNoBorder];
@@ -472,9 +549,15 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 
   // The composer sits pressed into the leather, which is the affordance that
   // says "write here". Unruled: it is a note pad, not a page.
-  PPWellView *compWell =
-      WrapInPaperWell(compScroll, NSMakeRect(0, 0, 720, 120),
-                      NSViewWidthSizable | NSViewHeightSizable, NO);
+  compWell = WrapInPaperWell(compScroll, NSMakeRect(0, 0, 720, 120),
+                             NSViewWidthSizable | NSViewHeightSizable, NO);
+
+  // Sits along the top of the composer's paper. Zero height until something is
+  // attached, so it costs nothing when unused; -attachmentsChanged does the
+  // arithmetic.
+  attachRow = [[[PPTokenRow alloc] initWithFrame:NSZeroRect] autorelease];
+  [attachRow setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+  [compWell addSubview:attachRow];
 
   NSSplitView *rightSplit =
       [[[NSSplitView alloc] initWithFrame:NSMakeRect(220, 30, 720, 580)] autorelease];
@@ -511,15 +594,9 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [statusField setStringValue:@"Ready"];
   [content addSubview:statusField];
 
-  attachField = [[[NSTextField alloc] initWithFrame:NSMakeRect(10, 6, 210, 18)]
-                    autorelease];
-  [attachField setBezeled:NO];
-  [attachField setDrawsBackground:NO];
-  [attachField setEditable:NO];
-  [attachField setSelectable:NO];
-  [attachField setFont:[NSFont systemFontOfSize:11.0]];
-  [attachField setTextColor:[NSColor colorWithCalibratedWhite:0.72 alpha:1.0]];
-  [content addSubview:attachField];
+  // The attachment count used to be a label here. It is a row of removable
+  // tokens above the composer now, which is both more informative and the only
+  // way to drop one file without clearing the lot.
 
   spinner = [[[NSProgressIndicator alloc] initWithFrame:NSMakeRect(618, 6, 16, 16)]
                 autorelease];
@@ -613,17 +690,44 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 
 // --- actions ---------------------------------------------------------------
 
+// Lay the token strip along the top of the composer's paper and give the
+// composer whatever is left. The strip takes no height at all when nothing is
+// attached, so the composer is full size in the usual case.
 - (void)attachmentsChanged {
   NSArray *a = [composer attachments];
-  if ([a count] == 0) { [attachField setStringValue:@""]; return; }
-  [attachField setStringValue:
-      [NSString stringWithFormat:@"%lu attachment%@", (unsigned long)[a count],
-                                 [a count] == 1 ? @"" : @"s"]];
+  [attachRow setPaths:a target:self action:@selector(removeAttachment:)];
+
+  NSRect inner = NSInsetRect([compWell bounds], 5, 5);
+  CGFloat rowHeight = [a count] ? 24.0 : 0.0;
+
+  [attachRow setHidden:([a count] == 0)];
+  [attachRow setFrame:NSMakeRect(inner.origin.x,
+                                 NSMaxY(inner) - rowHeight,
+                                 inner.size.width, rowHeight)];
+  [compScroll setFrame:NSMakeRect(inner.origin.x, inner.origin.y,
+                                  inner.size.width,
+                                  inner.size.height - rowHeight)];
+  [compWell setNeedsDisplay:YES];
+}
+
+- (void)removeAttachment:(id)sender {
+  [composer removeAttachmentAtIndex:(NSUInteger)[sender tag]];
+  [self attachmentsChanged];
 }
 
 - (void)modelChanged:(id)sender {
   NSString *mid = [modelPopup titleOfSelectedItem];
   if (!mid) return;
+
+  // Mid-turn the worker thread is reading the config and the system prompt, so
+  // the change is refused rather than raced. Put the popup back where it was.
+  if ([bridge isBusy]) {
+    [modelPopup selectItemWithTitle:[bridge modelId]];
+    [statusField setStringValue:@"Finish the current turn before changing model"];
+
+    return;
+  }
+
   [bridge setModelId:mid];
   [self appendPlain:[NSString stringWithFormat:@"\n[model: %@%@]\n\n", mid,
                         [bridge modelSupportsImages] ? @", vision" : @""]];
@@ -1094,6 +1198,40 @@ static BOOL writeViewPNG(NSView *view, NSString *path) {
          badTitles == 0 ? "ok" : "FAIL");
   if (badTitles) failures++;
 
+  // A model change has to rebuild the system message: it carries the model id,
+  // the context window it was budgeted against, and whether images are usable.
+  // Nothing about that is visible from the interface, so assert it here.
+  {
+    NSString *before = [[[bridge systemPrompt] copy] autorelease];
+    NSString *original = [[[bridge modelId] copy] autorelease];
+
+    NSString *other = nil;
+    for (NSInteger i = 0; i < [modelPopup numberOfItems] && !other; i++) {
+      NSString *t = [[modelPopup itemAtIndex:i] title];
+      if ([t length] && ![t isEqualToString:original]) other = t;
+    }
+
+    if (!other) {
+      printf("  FAIL only one model available, cannot test the rebuild\n");
+      failures++;
+    }
+
+    else {
+      [bridge setModelId:other];
+      NSString *after = [bridge systemPrompt];
+
+      BOOL changed = ![after isEqualToString:before];
+      BOOL names = [after rangeOfString:other].location != NSNotFound;
+      printf("  %-4s model change rebuilds the system prompt\n",
+             changed ? "ok" : "FAIL");
+      printf("  %-4s rebuilt prompt names the new model\n", names ? "ok" : "FAIL");
+      if (!changed) failures++;
+      if (!names) failures++;
+
+      [bridge setModelId:original];
+    }
+  }
+
   printf("\n%s\n", failures == 0 ? "all checks passed" : "CHECKS FAILED");
 
   return failures == 0 ? 0 : 1;
@@ -1163,6 +1301,11 @@ static BOOL writeViewPNG(NSView *view, NSString *path) {
   }
 
   [self installSampleTranscript];
+
+  // Two attachments so the token strip is in the picture rather than collapsed.
+  [composer addAttachment:@"/Users/brie/Desktop/Sample/AppDelegate.m"];
+  [composer addAttachment:@"/tmp/a-rather-long-screenshot-name.png"];
+  [self attachmentsChanged];
 
   [[NSFileManager defaultManager] createDirectoryAtPath:dir
                              withIntermediateDirectories:YES

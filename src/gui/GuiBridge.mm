@@ -505,6 +505,10 @@ static ppcode::json ObjCToJson(id o) {
 }
 
 - (void)reloadConfig {
+  // Same race as -setModelId:: replacing cfg wholesale while a turn is running
+  // would pull it out from under the worker thread.
+  if (st->busy.load()) return;
+
   std::vector<std::string> warn;
   std::string path = st->cfg.config_path;
   st->cfg = ppcode::Config::load(path, &warn);
@@ -657,10 +661,17 @@ static ppcode::json ObjCToJson(id o) {
 - (NSString *)modelId { return Str(st->cfg.model); }
 
 - (void)setModelId:(NSString *)mid {
+  // The worker thread reads cfg and the agent's system prompt for the whole of
+  // a turn, so changing them underneath it is a data race. Callers are expected
+  // to check -isBusy first; this is the backstop.
+  if (st->busy.load()) return;
+
   st->cfg.model = Cpp(mid);
   st->client->set_model(st->cfg.model);
   [self rebuildSystemPrompt];
 }
+
+- (NSString *)systemPrompt { return Str(st->agent->system_prompt()); }
 
 - (BOOL)modelSupportsImages {
   const ModelInfo *mi = st->catalog.find(st->cfg.model);

@@ -107,13 +107,18 @@ rather than guessed at.
 
 ### 3.5 Smaller queued items
 
-- **`Client::set_config`** was added for the settings window; make sure a model
-  change from the GUI reliably rebuilds the system prompt.
+- ~~**`Client::set_config`** model-change rebuild~~ — done, and `--check` now
+  asserts that changing the model both rebuilds the system prompt and names the
+  new model in it. Config changes are also refused mid-turn: the worker thread
+  reads `cfg` and the prompt for the whole of a turn, so changing them under it
+  was a data race.
+- ~~**Attachment display**~~ — done: a row of removable tokens above the
+  composer, replacing a label that gave only a count.
 - The **GUI has been run for real** (Brielle, 26 Jul): it launches, settings
-  persist, a changed default model survives a relaunch. Streaming markdown has
-  still not been watched during a live turn — that is the remaining unknown.
-- **Attachment display** in the GUI is a plain label; a token row with remove
-  buttons would be better.
+  persist, a changed default model survives a relaunch. **Streaming markdown has
+  still not been watched during a live turn** — that is the remaining unknown,
+  and the only §3.5 item left. `--check` and `--shot` cover construction and
+  rendering, but neither drives `-streamDelta:` with real deltas.
 - **`xib` connection editing** was deliberately not implemented — see §4.
 - The **CLI inside the .app is not self-contained**, on purpose. See the release
   skill; do not "fix" it.
