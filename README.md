@@ -45,6 +45,28 @@ From another machine, `./deploy.sh` rsyncs the tree over and builds remotely:
 Requirements, all present via MacPorts: `gcc15` (15.2.0, for C++23), `curl`,
 `ncurses`, `gmake`. `nlohmann/json` is vendored in `third_party/`.
 
+## The Cocoa application
+
+```sh
+gmake app          # build build/ppcode.app
+ppcode gui         # or just: open build/ppcode.app
+```
+
+A real Aqua application in front of the same engine — Objective-C++ lets the
+controller hold the C++ agent directly, so nothing is reimplemented. Source list
+of past conversations, split view with transcript over composer, drag files or
+images straight into the composer, model picker, tool approval as an alert.
+Return sends, Option-Return inserts a newline, and typing while a turn runs
+steers it just as in the terminal.
+
+`./build/ppcode-gui --check` builds the window, walks the view hierarchy and
+reports what it found — verification that works on a machine whose display is
+asleep, where a screenshot would only prove the screen is black.
+
+Building Objective-C++ with GCC here has real constraints — no fast enumeration,
+a compiler crash on any C++ catch clause, fragile-ABI ivar placement — all
+documented in `knowledge/60-objcpp-gcc.md`.
+
 ## Setup
 
 ```sh
@@ -391,7 +413,7 @@ HTTP path locally.
 ## Testing
 
 ```sh
-./build/ppcode --selftest         # 334 offline checks
+./build/ppcode --selftest         # 352 offline checks
 ./build/ppcode --selftest --net   # adds live OpenRouter calls
 ```
 
@@ -468,8 +490,10 @@ reach, and the probe will say so.
 ## Layout
 
 ```
+src/gui/        the Cocoa application (Objective-C++)
 src/
   appledocs.*   the local Apple reference library, via its SQLite index
+  checkpoint.*  snapshots before edits, undo, and unified diffs
   builderr.*    running builds, parsing compiler and linker diagnostics
   macgui.*      screencapture and the running-application list
   session.*     session persistence and context compaction
