@@ -1,5 +1,6 @@
 // main.cpp -- argument parsing and dispatch.
 #include "agent.hpp"
+#include "appledocs.hpp"
 #include "common.hpp"
 #include "config.hpp"
 #include "envinfo.hpp"
@@ -297,6 +298,7 @@ int main(int argc, char** argv) {
     add_job_tools(tools, jobs);
     web::add_tools(tools, web::SearchConfig::from_env());
     xcode::add_tools(tools);
+    if (appledocs::available()) appledocs::add_tools(tools);
 
     // MCP servers contribute additional tools. A server that fails to start is
     // reported and skipped -- it must not prevent ppcode from running.

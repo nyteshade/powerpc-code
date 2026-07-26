@@ -4,6 +4,7 @@
 #include "selftest.hpp"
 
 #include "agent.hpp"
+#include "appledocs.hpp"
 #include "attach.hpp"
 #include "common.hpp"
 #include "config.hpp"
@@ -791,6 +792,76 @@ void test_web() {
     }
 }
 
+void test_appledocs() {
+    std::printf("[apple docs]\n");
+    if (!appledocs::available()) {
+        std::printf("  skip  no Apple documentation installed on this machine\n");
+        return;
+    }
+    check(!appledocs::docset_indexes().empty(), "docset index found");
+
+    // A well-known Foundation class method. This exercises the whole join --
+    // token, type, container, framework, declaration and abstract.
+    appledocs::Query q;
+    q.name = "stringWithFormat:";
+    q.limit = 5;
+    std::string err;
+    std::vector<appledocs::Entry> hits = appledocs::search(q, &err);
+    check(!hits.empty(), "exact API lookup returns a result" +
+                             (err.empty() ? "" : ": " + err));
+    if (!hits.empty()) {
+        const appledocs::Entry& e = hits[0];
+        check(e.name == "stringWithFormat:", "token name");
+        check(e.container == "NSString", "owning class resolved");
+        check(e.framework == "Foundation", "framework resolved");
+        check(e.type.find("method") != std::string::npos, "token type humanised");
+        check(e.declaration.find("stringWithFormat") != std::string::npos,
+              "declaration present");
+        check(e.declaration.find('<') == std::string::npos,
+              "declaration has its HTML stripped");
+        check(!e.abstract.empty(), "abstract present");
+    }
+
+    // A class lookup, narrowed by type.
+    {
+        appledocs::Query c;
+        c.name = "NSString";
+        c.type_filter = "class";
+        c.limit = 3;
+        std::vector<appledocs::Entry> got = appledocs::search(c, nullptr);
+        check(!got.empty(), "class lookup with a type filter");
+    }
+
+    // The case that matters most: something that genuinely does not exist here.
+    {
+        appledocs::Query g;
+        g.name = "dispatch_async";
+        std::vector<appledocs::Entry> got = appledocs::search(g, nullptr);
+        check(got.empty(), "an API absent from this OS returns nothing");
+        check(appledocs::search_headers("dispatch_async", 4).empty(),
+              "and is absent from the headers too");
+    }
+
+    // Headers are the compiler's ground truth, so they must be searchable.
+    {
+        std::vector<std::string> h = appledocs::search_headers("NSAutoreleasePool", 6);
+        check(!h.empty(), "header search finds a real Foundation class");
+    }
+
+    // Injection safety: the query reaches us from a model.
+    {
+        appledocs::Query bad;
+        bad.name = "'; DROP TABLE ZTOKEN; --";
+        std::string berr;
+        std::vector<appledocs::Entry> got = appledocs::search(bad, &berr);
+        check(got.empty() && !berr.empty(), "a hostile query is rejected");
+        // And the table is still there.
+        appledocs::Query again;
+        again.name = "NSString";
+        check(!appledocs::search(again, nullptr).empty(), "index survived");
+    }
+}
+
 void test_envinfo() {
     std::printf("[envinfo]\n");
     bool ok = false;
@@ -1063,6 +1134,7 @@ int run_selftest(bool with_network) {
     test_render();
     test_web();
     test_plist_and_xcode();
+    test_appledocs();
     test_envinfo();
     test_config();
     test_agent_offline();
