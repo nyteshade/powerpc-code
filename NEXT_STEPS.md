@@ -66,44 +66,23 @@ dylib relocation, subagents (`task`, `task_batch`), todo.
 
 ## 3. Outstanding work, in priority order
 
-### 3.1 GUI: native markdown rendering  *(task #39 — highest value)*
+### ~~3.1 GUI: native markdown rendering~~ — **done**
 
-The transcript is plain `NSAttributedString` with three hardcoded styles. It
-should render markdown properly: headings, emphasis, lists, quotes, inline code,
-and fenced code blocks with syntax highlighting.
+Structure is parsed in `src/mdparse.cpp` (plain C++, so `--selftest` covers it —
+38 checks); `src/gui/Markdown.mm` maps it to attributes. Headings, lists with
+hanging indents, quotes, tables, rules, fenced code via `render::highlight()`,
+and nesting emphasis. Streaming re-renders only closed blocks, via
+`md::complete_prefix()`.
 
-**Do not use a WebView.** Brielle was explicit: Leopard's WebKit is ancient and
-JavaScript is slow on a G5. Native only.
+### ~~3.2 GUI: wire the skeuomorphic skin through~~ — **done**
 
-**Reuse `render::highlight()`** from `src/render.cpp` for code blocks — it is
-already written and tested and knows Objective-C. Do *not* reuse
-`render::markdown()` for block layout: it wraps to a fixed column count for a
-monospace terminal, which is wrong for a proportional font where the text view
-does its own wrapping. Write GUI-appropriate block layout and map spans to
-attributes.
+Leather content view with stitching, gold embossed header, paper in recessed
+wells. Two latent bugs in `Skin.mm` were fixed doing it: the noise lattice did
+not wrap, so the "seamless" tiles were visibly gridded, and painting paper as a
+pattern `NSColor` on a scrolling text view showed phase seams. Textures remain
+procedural — keep it that way.
 
-Suggested home: `src/gui/Markdown.h/.mm`, exposing
-`NSAttributedString *PPAttributedFromMarkdown(const std::string &md)`.
-
-Code blocks want a Monaco font, a light background fill, and an indent —
-`NSParagraphStyle` with `setFirstLineHeadIndent:`/`setHeadIndent:`.
-
-### 3.2 GUI: wire the skeuomorphic skin through  *(task #40)*
-
-`src/gui/Skin.mm` is written and compiles — procedural oxblood leather, aged
-ruled paper, saddle stitching, recessed wells, raised panels, embossed text. It
-is **not yet used** by `main.mm`.
-
-To do: sidebar and window chrome in `PPLeatherView`, transcript backdrop in
-`PPPaperView`, composer in a recessed well, an embossed title. Brielle asked for
-"full skeuomorph" — this is the right direction for Leopard, and flat design is
-explicitly wrong here (see `knowledge/30-aqua-and-cocoa.md`).
-
-Textures are **generated, not downloaded** — deliberate: nothing to license or
-ship, and a 128px tile computed once at launch is far cheaper on a G5 than
-decompressing photographs. Keep it that way.
-
-### 3.3 Reformat the Objective-C  *(task #41)*
+### 3.3 Reformat the Objective-C  *(task #41 — next)*
 
 `src/gui/*.mm` and `*.h` were written **before** Brielle's formatting guide
 arrived, so they are 4-space indent with K&R braces. The guide is at
@@ -115,7 +94,8 @@ line before `return`, blank line between *every* type member, `else`/`@catch` on
 a new line **after a blank line**, `case` at the same indent as `switch`,
 message sends broken with the receiver alone on the first line.
 
-`Settings.mm` helpers `Or()`/`OrObj()` are already in the new style; the rest is
+`Settings.mm` helpers `Or()`/`OrObj()` are already in the new style, as are
+`Markdown.mm` and the parts of `Settings.mm`/`main.mm` touched since; the rest is
 not.
 
 ### 3.4 Terminal diagnostic for iTerm 2.0 Legacy
@@ -129,11 +109,14 @@ rather than guessed at.
 
 - **`Client::set_config`** was added for the settings window; make sure a model
   change from the GUI reliably rebuilds the system prompt.
-- The **GUI is untested against a live turn** — `--check` verifies construction
-  only. It needs a real conversation run once a key is entered.
+- The **GUI has been run for real** (Brielle, 26 Jul): it launches, settings
+  persist, a changed default model survives a relaunch. Streaming markdown has
+  still not been watched during a live turn — that is the remaining unknown.
 - **Attachment display** in the GUI is a plain label; a token row with remove
   buttons would be better.
 - **`xib` connection editing** was deliberately not implemented — see §4.
+- The **CLI inside the .app is not self-contained**, on purpose. See the release
+  skill; do not "fix" it.
 
 ---
 
@@ -191,17 +174,42 @@ All documented in `knowledge/`, but the ones that cost the most time:
 
 ## 7. How to verify things properly
 
-The display sleeps and the accessibility API is off, so screenshots often prove
-nothing. Prefer:
+**`screencapture` over ssh is worthless.** It returns a uniformly black frame —
+mean 0, one colour, no error — whether or not the display is awake, because the
+ssh session cannot read the console framebuffer. Measured with Brielle watching
+the app on screen at the time. `launchctl bsexec` into the console session needs
+root and fails.
+
+Prefer:
 
 - `--selftest` for anything with a parser or tool behaviour.
-- `ppcode-gui --check` for interface construction.
+- `ppcode-gui --check` for interface construction *and wiring* — it now also
+  asserts menu items resolve to a target and that titles survive a UTF-8 round
+  trip, both of which shipped broken once.
+- **`ppcode-gui --shot <dir>`** for anything visual. The application screenshots
+  itself with `-cacheDisplayInRect:toBitmapImageRep:`, which draws offscreen, so
+  it works with the display asleep, needs no root, and never touches the
+  accessibility API. Writes the window, the transcript at full laid-out height,
+  and every settings tab. `scp` them back and look at them — this is what caught
+  the double-spaced code blocks, the invisible rule, and the tile seams.
 - `tui_drive.py` for terminal rendering and key handling.
 - `ibtool --compile` for nib validity; a clean `xcodebuild` for project validity.
 - `otool -L` + a real run for dylib relocation.
 
 Do not enable the accessibility API to test your own work — it is a system-wide
 automation permission and not yours to flip.
+
+---
+
+## 9. Releasing
+
+`./scripts/release.sh 0.3.0` does the whole thing; `.claude/skills/release`
+documents it. `VERSION` at the root is the only place the number lives.
+
+The `.app` is self-contained: `gmake app` runs `scripts/bundle_dylibs.sh`, which
+copies the seventeen-library MacPorts closure into `Contents/Frameworks` and
+rewrites the install names. The release will not publish if anything in the
+bundle still links `/opt/local`.
 
 ---
 
