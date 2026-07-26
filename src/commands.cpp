@@ -208,7 +208,12 @@ std::string env_assignment(const std::string& key, const std::string& value) {
         else q += c;
     }
     q += "'";
-    return key + "=" + q + " ";
+    // Assign and export as separate statements rather than as a `VAR=x cmd`
+    // prefix. With the prefix form the variable exists only in the command's
+    // environment, and a `$VAR` written in that same command line is expanded
+    // by the parent shell first -- so it comes out empty, which is exactly what
+    // a hook author would not expect.
+    return key + "=" + q + "; export " + key + "; ";
 }
 
 } // namespace
