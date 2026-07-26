@@ -75,7 +75,19 @@ ppcode
 | mouse wheel | scroll the transcript |
 
 Slash commands: `/help` `/model` `/models` `/tools` `/mcp` `/env` `/jobs`
-`/cwd` `/yolo` `/unicode` `/clear` `/save` `/load` `/cost` `/quit`.
+`/compact` `/sessions` `/cwd` `/yolo` `/unicode` `/clear` `/save` `/load`
+`/cost` `/quit`.
+
+**Typing while the model works steers it.** Enter queues the text and it is
+injected between rounds — after the current step's tool results, before the next
+model call — so a wrong turn can be corrected without cancelling and discarding
+the work already done.
+
+At an approval prompt, answer by typing `y`, `n` or `a` and pressing Enter, or
+with Ctrl+Y / Ctrl+N. Single-letter hotkeys were tried and removed: there is no
+way to tell `a` meaning approve-everything from the `A` beginning "Actually,
+stop and do X instead", so the letter was swallowed and the tool silently
+approved. Letters are always text now.
 
 `/model` with no argument opens a searchable picker showing each model's context
 window, price per Mtok, and whether it supports tools and vision, with a pinned
@@ -192,16 +204,96 @@ ppcode --no-knowledge -p "..."       # omit the corpus
 Add your own documents to `~/.config/ppcode/knowledge/*.md`, or point
 `PPCODE_KNOWLEDGE_DIR` elsewhere.
 
+### Project instructions
+
+A `.ppcode.md` in your project is loaded into the system message, the way a
+`CLAUDE.md` would be. It is searched from the working directory upwards, stopping
+at the repository root, so running ppcode in a subdirectory still finds it.
+`ppcode.md`, `AGENTS.md` and `CLAUDE.md` also work. This repository has one
+describing its own build rules. Disable with `--no-project-docs`.
+
+### Sessions
+
+Every turn is saved. Nothing is lost when a terminal closes.
+
+```sh
+ppcode --continue                # resume the most recent session here
+ppcode --resume 20260726-123128  # resume a specific one
+ppcode --sessions                # list them
+ppcode --no-save -p "..."        # don't persist this one
+```
+
+When a conversation passes 70% of the model's context window it is **compacted**
+automatically: the system message and the most recent exchanges are kept, and the
+older middle is replaced by a summary written so work can continue from it —
+goal, what was done with exact paths, decisions and their reasons, what is
+broken, next step. `/compact` forces it.
+
+The cut point matters: a tool result cannot be separated from the assistant turn
+that requested it or the next request is rejected, so the boundary is walked back
+until nothing is left dangling.
+
+### Cost control
+
+The system message is several thousand tokens of machine and platform context,
+identical on every round. **Prompt caching** puts `cache_control` breakpoints on
+it and just before the newest turn, for providers that need them. Measured on a
+two-round task: **$0.0958 → $0.0675, a 29.5% saving**, and it grows with round
+count — hit rates of 99% are normal on a long turn. `--no-cache` disables it.
+
+```sh
+ppcode --max-cost 0.50 -p "..."   # stop once 50 cents have been spent
+```
+
+Transient failures (429, 5xx, connection and TLS errors) are retried with
+exponential backoff. A retry is refused once any token has reached you, because
+the text is already on screen and retrying would duplicate it.
+
 ### Tools
 
 | | |
 | --- | --- |
 | Files | `read_file` `read_many_files` `write_file` `edit_file` `multi_edit` `file_op` `list_dir` `glob` `grep` |
 | Shell | `bash` (timed out and killed by process group) |
+| Building | `build` (structured diagnostics) |
 | Long work | `run_background` `job_list` `job_output` `job_stop` |
 | Web | `web_fetch` `web_search` |
 | Xcode | `xcode_info` `xcode_add_file` `xcode_set_setting` `xcode_add_framework` |
+| Docs | `apple_docs` (the local Apple reference library) |
+| GUI | `screenshot` `list_apps` |
+| Delegation | `task` `task_batch` |
 | Planning | `todo_write` |
+
+**`apple_docs`** searches the ~61,000 API tokens Xcode 3 indexes under
+`/Developer/Documentation`, plus the framework headers. This is the single
+biggest accuracy win here: a model's training data is dominated by far newer
+systems, so it will confidently reach for APIs that do not exist on 10.5, and
+finding that out from a compile error costs minutes. Looking up `dispatch_async`
+correctly reports it is absent, steering to `NSThread`/`NSOperationQueue`.
+
+**`build`** runs a build and returns file/line/severity/message plus the source
+line the compiler echoed, errors before warnings, instead of several hundred
+lines of log you pay for on every subsequent round.
+
+**`screenshot`** lets a vision-capable model see the Aqua application it just
+built — check a layout, spot a misaligned control, read an error dialog. Blank
+frames (a sleeping display) are detected and *not* sent, since paying a vision
+model to look at a black rectangle is pure waste.
+
+**`task` / `task_batch`** delegate to subagents with their own context, returning
+only their conclusion. The model is selectable per agent, so bulk searching can
+run on something cheap while the parent stays on a frontier model, and
+`task_batch` fans out concurrently. Define your own in `agents/*.md`:
+
+```yaml
+---
+name: code-scout
+description: Finds where something lives and reports exact paths and line numbers.
+model: deepseek/deepseek-v4-pro
+tools: [read_file, read_many_files, grep, glob, list_dir]
+---
+You locate things in a codebase and report precisely what you found.
+```
 
 **Long-running work.** A `port install` or a large compile on this hardware can
 run for hours, sometimes more than a day — far past any sensible `bash` timeout.
@@ -299,7 +391,7 @@ HTTP path locally.
 ## Testing
 
 ```sh
-./build/ppcode --selftest         # 270 offline checks
+./build/ppcode --selftest         # 334 offline checks
 ./build/ppcode --selftest --net   # adds live OpenRouter calls
 ```
 
@@ -377,6 +469,11 @@ reach, and the probe will say so.
 
 ```
 src/
+  appledocs.*   the local Apple reference library, via its SQLite index
+  builderr.*    running builds, parsing compiler and linker diagnostics
+  macgui.*      screencapture and the running-application list
+  session.*     session persistence and context compaction
+  subagent.*    task / task_batch, and custom agent definitions
   common.*      strings, JSON helpers, stdio file I/O, base64, logging
   config.*      config file + environment
   http.*        libcurl wrapper and the incremental SSE parser
