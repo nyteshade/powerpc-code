@@ -35,6 +35,19 @@ struct Doc {
 //   ./knowledge
 std::vector<std::string> knowledge_dirs();
 
+// Per-project instructions, the equivalent of a CLAUDE.md. Searched from `cwd`
+// upwards to the repository root (or the filesystem root), so running ppcode in
+// a subdirectory still finds the project's file. Accepted names, in order of
+// preference: .ppcode.md, ppcode.md, AGENTS.md, CLAUDE.md.
+//
+// Returns the concatenated contents, outermost file first, so a repository-wide
+// file is followed by a more specific one that can override it.
+struct ProjectDoc {
+    std::string path;
+    std::string body;
+};
+std::vector<ProjectDoc> load_project_docs(const std::string& cwd);
+
 // Load every *.md found, deduplicated by id with earlier directories winning,
 // sorted by priority. Never throws; unreadable files are skipped.
 std::vector<Doc> load_docs(std::vector<std::string>* warnings = nullptr);
@@ -59,6 +72,8 @@ struct Inputs {
 
     // Set false to leave the knowledge corpus out entirely.
     bool include_knowledge = true;
+    // Set false to ignore any .ppcode.md in the project.
+    bool include_project_docs = true;
 
     // Fraction of the context window the whole system message may occupy.
     double budget_fraction = 0.10;
@@ -70,6 +85,7 @@ struct Result {
     size_t est_tokens = 0;
     std::vector<std::string> included_docs;
     std::vector<std::string> skipped_docs;   // dropped for budget or context
+    std::vector<std::string> project_docs;   // paths of any .ppcode.md found
 };
 
 Result build(const Inputs& in);

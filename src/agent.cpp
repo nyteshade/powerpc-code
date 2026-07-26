@@ -1,9 +1,12 @@
 #include "agent.hpp"
 
 #include "attach.hpp"
+#include "session.hpp"
 
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <unistd.h>
 
 namespace ppcode {
@@ -106,6 +109,27 @@ Agent::RunResult Agent::loop(const Events& ev, std::atomic<bool>* cancel) {
             return res;
         }
 
+        // Compact before the request rather than after a failure: once the
+        // window is exceeded the call is simply rejected, and on this hardware
+        // discovering that costs a round trip.
+        if (context_limit_ > 0 &&
+            session::should_compact(history_, context_limit_)) {
+            if (ev.on_status) ev.on_status("compacting the conversation");
+            session::CompactResult c = session::compact(client_, &history_);
+            if (c.ok) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                              "compacted %d messages to %d (about %lld tokens to %lld)",
+                              c.messages_before, c.messages_after,
+                              static_cast<long long>(c.tokens_before),
+                              static_cast<long long>(c.tokens_after));
+                if (ev.on_status) ev.on_status(buf);
+                log_line(buf);
+            } else {
+                log_line("compaction skipped: " + c.error);
+            }
+        }
+
         res.rounds++;
         if (ev.on_status) ev.on_status(round == 0 ? "thinking" : "thinking (continuing)");
 
@@ -168,6 +192,7 @@ Agent::RunResult Agent::loop(const Events& ev, std::atomic<bool>* cancel) {
         if (cr.message.tool_calls.empty()) {
             if (has_pending_steering()) continue;
             res.ok = true;
+            save_session();
             return res;
         }
 
@@ -260,11 +285,46 @@ Agent::RunResult Agent::loop(const Events& ev, std::atomic<bool>* cancel) {
     return res;
 }
 
+bool Agent::compact_now(std::string* summary, std::string* error) {
+    session::CompactResult c = session::compact(client_, &history_);
+    if (!c.ok) {
+        if (error) *error = c.error;
+        return false;
+    }
+    if (summary) *summary = c.summary;
+    return true;
+}
+
+void Agent::save_session() {
+    if (session_path_.empty()) return;
+    std::error_code ec;
+    std::filesystem::path p(session_path_);
+    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    std::string err;
+    if (!write_file_text(session_path_, to_json().dump(2) + "\n", &err))
+        log_line("could not save session: " + err);
+}
+
 json Agent::to_json() const {
     json j;
     j["version"] = 1;
     j["model"] = cfg_.model;
     j["cwd"] = cwd_;
+    j["updated_at"] = static_cast<int64_t>(std::time(nullptr));
+
+    // A title makes the resume picker readable; derive it from the first thing
+    // the user actually asked for.
+    std::string title = title_;
+    if (title.empty()) {
+        for (const Message& m : history_) {
+            if (m.role != "user") continue;
+            std::string t = trim(m.display_text());
+            if (t.empty() || starts_with(t, "[Earlier conversation")) continue;
+            title = elide(t, 70);
+            break;
+        }
+    }
+    j["title"] = title;
     json msgs = json::array();
     for (const Message& m : history_) msgs.push_back(m.to_json());
     j["messages"] = msgs;

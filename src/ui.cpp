@@ -11,6 +11,7 @@
 #include "ui.hpp"
 
 #include "jobs.hpp"
+#include "session.hpp"
 #include "render.hpp"
 #include "utf8.hpp"
 
@@ -955,6 +956,8 @@ bool Tui::handle_slash(const std::string& line) {
             "  /yolo           toggle approving every tool automatically\n"
             "  /unicode        toggle box-drawing and typographic characters\n"
             "  /clear          start a fresh conversation\n"
+            "  /compact        summarise the conversation to free up context\n"
+            "  /sessions       list saved sessions\n"
             "  /save PATH      write this session to a file\n"
             "  /load PATH      restore a session\n"
             "  /cost           show token and cost totals\n"
@@ -1072,6 +1075,32 @@ bool Tui::handle_slash(const std::string& line) {
         std::string out;
         for (const std::string& l : mcp_->status_lines()) out += "  " + l + "\n";
         add(Kind::Info, "MCP servers:\n" + out);
+        return true;
+    }
+    if (cmd == "/compact") {
+        if (busy_.load()) { add(Kind::Error, "cannot compact while a turn is running"); return true; }
+        add(Kind::Status, "summarising the conversation...");
+        draw();
+        std::string summary, err;
+        if (agent_.compact_now(&summary, &err)) {
+            entries_.clear();
+            dirty_ = true;
+            add(Kind::Info, "Conversation compacted. Summary of the earlier work:\n\n" +
+                                summary);
+        } else {
+            add(Kind::Error, "could not compact: " + err);
+        }
+        return true;
+    }
+    if (cmd == "/sessions") {
+        std::vector<session::Meta> all = session::list(20);
+        if (all.empty()) { add(Kind::Info, "no saved sessions"); return true; }
+        std::string out;
+        for (const session::Meta& m : all)
+            out += "  " + m.id + "  " + m.age() + "  " +
+                   std::to_string(m.message_count) + " msg\n      " +
+                   elide(m.title, 74) + "\n";
+        add(Kind::Info, "saved sessions (resume with: ppcode --resume ID):\n" + out);
         return true;
     }
     if (cmd == "/cwd") {

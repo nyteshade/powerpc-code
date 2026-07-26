@@ -1,6 +1,7 @@
 // main.cpp -- argument parsing and dispatch.
 #include "agent.hpp"
 #include "appledocs.hpp"
+#include "builderr.hpp"
 #include "common.hpp"
 #include "config.hpp"
 #include "envinfo.hpp"
@@ -11,6 +12,7 @@
 #include "jobs.hpp"
 #include "mcp.hpp"
 #include "openrouter.hpp"
+#include "session.hpp"
 #include "subagent.hpp"
 #include "sysprompt.hpp"
 #include "webtools.hpp"
@@ -22,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <unistd.h>
 
@@ -61,11 +64,15 @@ const char* kUsage =
     "      --max-cost USD       stop once this much has been spent this session\n"
     "      --no-cache           disable prompt caching (on by default where supported)\n"
     "  -q, --quiet              suppress progress output on stderr\n"
-    "      --resume PATH        load a saved session first\n"
+    "  -r, --continue           resume the most recent session in this directory\n"
+    "      --resume [ID]        resume a session by id, or the most recent\n"
+    "      --sessions           list saved sessions and exit\n"
+    "      --no-save            do not persist this session\n"
     "      --save PATH          write the session out when done\n"
     "      --env-detail LEVEL   machine context: none|minimal|brief|standard|full\n"
     "      --refresh-env        re-probe the machine instead of using the cache\n"
     "      --no-knowledge       omit the platform knowledge documents\n"
+    "      --no-project-docs    ignore any .ppcode.md in the project\n"
     "      --show-context       report how the system message was assembled\n"
     "      --list-models [SUB]  list available models, optionally filtered\n"
     "      --write-config       write a default config file and exit\n"
@@ -133,13 +140,15 @@ int main(int argc, char** argv) {
     bool want_version = false;
     bool yolo = false, quiet = false;
     bool refresh_env = false, no_knowledge = false, show_context = false;
+    bool no_project_docs = false;
     std::string env_detail_opt, job_path;
     bool dry_run = false;
     std::vector<std::string> attach_paths;
     int max_turns = -1;
     double max_cost = -1.0;
     bool cache_off = false;
-    std::string prompt, resume_path, save_path;
+    std::string prompt, resume_path, save_path, resume_id;
+    bool want_continue = false, want_sessions = false, no_save = false;
     std::vector<std::string> allow_tools, deny_tools;
 
     for (int i = 1; i < argc; i++) {
@@ -155,6 +164,7 @@ int main(int argc, char** argv) {
         else if (a == "--write-config")            want_write_config = true;
         else if (a == "--refresh-env")             refresh_env = true;
         else if (a == "--no-knowledge")            no_knowledge = true;
+        else if (a == "--no-project-docs")         no_project_docs = true;
         else if (a == "--show-context")            show_context = true;
         else if (a == "--dry-run")                 dry_run = true;
         else if (a == "--env-detail") { if (!need("--env-detail", &env_detail_opt)) return 2; }
@@ -177,7 +187,14 @@ int main(int argc, char** argv) {
         else if (a == "-C" || a == "--cwd")     { if (!need("--cwd", &cwd)) return 2; }
         else if (a == "-c" || a == "--config")  { if (!need("--config", &config_path)) return 2; }
         else if (a == "--output")               { if (!need("--output", &output_format)) return 2; }
-        else if (a == "--resume")               { if (!need("--resume", &resume_path)) return 2; }
+        else if (a == "--resume") {
+            // --resume alone opens the most recent; --resume ID or PATH targets one.
+            if (i + 1 < argc && argv[i + 1][0] != '-') resume_id = argv[++i];
+            else want_continue = true;
+        }
+        else if (a == "-r" || a == "--continue")   want_continue = true;
+        else if (a == "--sessions")                want_sessions = true;
+        else if (a == "--no-save")                 no_save = true;
         else if (a == "--save")                 { if (!need("--save", &save_path)) return 2; }
         else if (a == "--log")                  { if (!need("--log", &log_path)) return 2; }
         else if (a == "--max-turns") {
@@ -281,6 +298,19 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (want_sessions) {
+        std::vector<session::Meta> all = session::list(40);
+        if (all.empty()) {
+            std::printf("no saved sessions\n");
+            return 0;
+        }
+        for (const session::Meta& m : all)
+            std::printf("%-24s %-10s %3d msg  $%.4f  %s\n    %s\n", m.id.c_str(),
+                        m.age().c_str(), m.message_count, m.cost,
+                        elide(m.cwd, 46).c_str(), elide(m.title, 76).c_str());
+        return 0;
+    }
+
     if (want_list) return cmd_list_models(cfg, list_filter);
 
     if (cfg.api_key.empty()) {
@@ -300,6 +330,7 @@ int main(int argc, char** argv) {
     web::add_tools(tools, web::SearchConfig::from_env());
     xcode::add_tools(tools);
     if (appledocs::available()) appledocs::add_tools(tools);
+    builderr::add_tools(tools);
 
     // Screenshot tooling is only worth advertising if there is a screen to
     // capture. Whether the model can actually see the result changes the tool's
@@ -356,6 +387,7 @@ int main(int argc, char** argv) {
         si.model_supports_tools = mi ? mi->supports_tools : true;
         si.tool_names = tools.names();
         si.include_knowledge = !no_knowledge;
+        si.include_project_docs = !no_project_docs;
         if (!env_detail_opt.empty()) {
             bool ok = false;
             envinfo::Detail d = envinfo::detail_from_string(env_detail_opt, &ok);
@@ -370,6 +402,63 @@ int main(int argc, char** argv) {
 
         sysprompt::Result sp = sysprompt::build(si);
         agent.set_system_prompt(sp.text);
+
+        // Compaction needs to know the window; without it a long session simply
+        // fails once it overflows.
+        agent.set_context_limit(si.context_tokens);
+
+        // Session persistence. Resolve what to resume, load it, then point the
+        // agent at a file it writes after every completed turn.
+        std::string load_path;
+        if (!resume_id.empty()) {
+            // Accept an id or a path.
+            load_path = (resume_id.find('/') != std::string::npos)
+                            ? expand_user(resume_id)
+                            : session::path_for(resume_id);
+        } else if (want_continue) {
+            session::Meta m;
+            if (session::most_recent(agent.cwd(), &m) ||
+                session::most_recent("", &m)) {
+                load_path = m.path;
+                if (!quiet)
+                    std::fprintf(stderr, "resuming %s (%s, %d messages): %s\n",
+                                 m.id.c_str(), m.age().c_str(), m.message_count,
+                                 elide(m.title, 60).c_str());
+            } else if (!quiet) {
+                std::fprintf(stderr, "ppcode: no previous session to resume\n");
+            }
+        } else if (!resume_path.empty()) {
+            load_path = expand_user(resume_path);
+        }
+
+        if (!load_path.empty()) {
+            std::string text, lerr;
+            if (!read_file_text(load_path, &text, &lerr)) {
+                std::fprintf(stderr, "ppcode: cannot resume: %s\n", lerr.c_str());
+                return 2;
+            }
+            try {
+                if (!agent.from_json(json::parse(text), &lerr)) {
+                    std::fprintf(stderr, "ppcode: cannot resume: %s\n", lerr.c_str());
+                    return 2;
+                }
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "ppcode: cannot resume: %s\n", e.what());
+                return 2;
+            }
+            // The restored system prompt describes whatever machine and model
+            // that session used; rebuild it for this run.
+            agent.set_system_prompt(sp.text);
+        }
+
+        if (!no_save) {
+            std::string sid = load_path.empty() ? session::new_id()
+                                                : std::filesystem::path(load_path).stem().string();
+            agent.set_session_path(load_path.empty() ? session::path_for(sid)
+                                                     : load_path);
+        }
+        // Keep the directory from growing without bound.
+        session::prune(30, 50);
 
         // Subagents inherit the platform context the parent just assembled, so
         // they know what machine they are on without rebuilding it. Registered
@@ -406,6 +495,9 @@ int main(int argc, char** argv) {
                          sp.skipped_docs.empty()
                              ? ""
                              : (" skipped=[" + join(sp.skipped_docs, " ") + "]").c_str());
+            if (!sp.project_docs.empty())
+                std::fprintf(stderr, "project docs: %s\n",
+                             join(sp.project_docs, ", ").c_str());
         }
     }
 
@@ -471,7 +563,7 @@ int main(int argc, char** argv) {
         opt.allow_tools = allow_tools;
         opt.deny_tools = deny_tools;
         opt.quiet = quiet;
-        opt.resume_path = resume_path;
+        opt.resume_path.clear();   // resume is resolved above
         opt.save_path = save_path;
 
         if (output_format == "text")             opt.format = OutputFormat::Text;

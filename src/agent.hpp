@@ -5,6 +5,7 @@
 
 #include "common.hpp"
 #include "openrouter.hpp"
+#include "session.hpp"
 #include "tools.hpp"
 
 #include <atomic>
@@ -93,6 +94,21 @@ public:
     void set_cwd(const std::string& cwd);
     const std::string& cwd() const { return cwd_; }
 
+    // The model's context window. When set, the conversation is summarised
+    // automatically once it approaches the limit, rather than failing the
+    // request outright. Zero disables it.
+    void set_context_limit(int64_t tokens) { context_limit_ = tokens; }
+    int64_t context_limit() const { return context_limit_; }
+
+    // Compact now, regardless of size. Returns false with a reason if the
+    // conversation is too short or the summary could not be produced.
+    bool compact_now(std::string* summary, std::string* error);
+
+    // Where this session is persisted, and whether to write after every turn.
+    void set_session_path(const std::string& path) { session_path_ = path; }
+    const std::string& session_path() const { return session_path_; }
+    void save_session();
+
     const Usage& session_usage() const { return session_usage_; }
 
     // Serialise / restore the conversation, for --resume and /save.
@@ -108,6 +124,10 @@ private:
     Usage session_usage_;
     std::string system_override_;
     bool cost_warned_ = false;
+
+    int64_t context_limit_ = 0;
+    std::string session_path_;
+    std::string title_;
 
     mutable std::mutex steering_mu_;
     std::vector<std::string> pending_steering_;

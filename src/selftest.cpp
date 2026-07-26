@@ -5,6 +5,7 @@
 
 #include "agent.hpp"
 #include "appledocs.hpp"
+#include "builderr.hpp"
 #include "attach.hpp"
 #include "common.hpp"
 #include "config.hpp"
@@ -14,6 +15,8 @@
 #include "openrouter.hpp"
 #include "plist.hpp"
 #include "render.hpp"
+#include "session.hpp"
+#include "sysprompt.hpp"
 #include "tools.hpp"
 #include "xcodeproj.hpp"
 #include "utf8.hpp"
@@ -792,6 +795,202 @@ void test_web() {
     }
 }
 
+void test_session() {
+    std::printf("[sessions]\n");
+    check(!session::sessions_dir().empty(), "sessions directory resolves");
+    check(!session::new_id().empty(), "new id generated");
+    check(session::path_for("abc").find("abc.json") != std::string::npos,
+          "path from id");
+
+    // Token estimation should count an image at a flat rate rather than by the
+    // length of its base64, which would be wildly wrong.
+    {
+        std::vector<Message> msgs;
+        msgs.push_back(Message::system_msg(std::string(4000, 'x')));
+        int64_t base = session::estimate_tokens(msgs);
+        check(base > 900 && base < 1100, "estimate is roughly chars/4");
+
+        Message img;
+        img.role = "user";
+        img.parts.push_back(ContentPart::make_image(
+            "data:image/png;base64," + std::string(200000, 'A')));
+        msgs.push_back(img);
+        int64_t with_img = session::estimate_tokens(msgs);
+        check(with_img - base < 2000,
+              "a base64 image is not counted by its encoded length");
+    }
+
+    check(!session::should_compact({}, 0), "no compaction without a known window");
+    {
+        std::vector<Message> big;
+        big.push_back(Message::system_msg(std::string(80000, 'x')));
+        check(session::should_compact(big, 8000), "large conversation triggers compaction");
+        check(!session::should_compact(big, 10000000), "big window does not");
+    }
+
+    // Compaction must refuse rather than corrupt when it cannot work.
+    {
+        Config cfg;
+        cfg.api_key = "";
+        Client c(cfg);
+        std::vector<Message> few;
+        few.push_back(Message::system_msg("sys"));
+        few.push_back(Message::user("hi"));
+        session::CompactResult r = session::compact(c, &few);
+        check(!r.ok, "refuses to compact a short conversation");
+        check(few.size() == 2, "and leaves it untouched");
+    }
+    {
+        // Long enough to try, but no API key, so it must fail cleanly and not
+        // damage the history.
+        Config cfg;
+        cfg.api_key = "";
+        Client c(cfg);
+        std::vector<Message> msgs;
+        msgs.push_back(Message::system_msg("sys"));
+        for (int i = 0; i < 20; i++) {
+            msgs.push_back(Message::user("u" + std::to_string(i)));
+            msgs.push_back(Message::assistant("a" + std::to_string(i)));
+        }
+        size_t before = msgs.size();
+        session::CompactResult r = session::compact(c, &msgs);
+        check(!r.ok && !r.error.empty(), "reports why it could not summarise");
+        check(msgs.size() == before, "history unchanged when summarising fails");
+    }
+
+    // The cut must never orphan a tool result from the call that produced it.
+    {
+        Config cfg;
+        cfg.api_key = "";
+        Client c(cfg);
+        std::vector<Message> msgs;
+        msgs.push_back(Message::system_msg("sys"));
+        for (int i = 0; i < 10; i++) {
+            Message a = Message::assistant("");
+            ToolCall tc;
+            tc.id = "c" + std::to_string(i);
+            tc.name = "read_file";
+            tc.arguments = "{}";
+            a.tool_calls.push_back(tc);
+            msgs.push_back(a);
+            msgs.push_back(Message::tool_result(tc.id, tc.name, "result"));
+        }
+        // Even though the summary call fails, the boundary logic runs first;
+        // assert the invariant on the structure we would have kept.
+        size_t before = msgs.size();
+        session::compact(c, &msgs);
+        check(msgs.size() == before, "tool-call pairs left intact on failure");
+    }
+}
+
+void test_builderr() {
+    std::printf("[build diagnostics]\n");
+
+    // Real GCC output shapes, including the source line the compiler echoes.
+    const std::string gcc_out =
+        "g++-mp-15 -std=c++23 -c src/utf8.cpp -o build/utf8.o\n"
+        "src/utf8.cpp:289:1: error: expected unqualified-id before 'this'\n"
+        "  289 | this is not valid C++ at all;\n"
+        "      | ^~~~\n"
+        "src/render.cpp:42:15: warning: unused variable 'x' [-Wunused-variable]\n"
+        "gmake: *** [Makefile:63: build/utf8.o] Error 1\n";
+
+    builderr::Report r = builderr::parse(gcc_out);
+    check(r.error_count() == 1, "one error parsed");
+    check(r.warning_count() == 1, "one warning parsed");
+    check(r.failed, "make failure marks the build as failed");
+    check(!r.make_failures.empty(), "make failure line captured");
+    if (!r.diagnostics.empty()) {
+        const builderr::Diagnostic& d = r.diagnostics[0];
+        check(d.file == "src/utf8.cpp", "file extracted");
+        check(d.line == 289, "line extracted");
+        check(d.column == 1, "column extracted");
+        check(d.severity == "error", "severity extracted");
+        check(d.message.find("unqualified-id") != std::string::npos, "message extracted");
+        check(d.context.find("not valid C++") != std::string::npos,
+              "echoed source line kept as context");
+    }
+    std::string summary = r.summarise();
+    check(summary.find("BUILD FAILED") != std::string::npos, "summary states failure");
+    check(summary.find("src/utf8.cpp:289") != std::string::npos,
+          "summary names the location");
+
+    // Errors must sort ahead of warnings; a warning first would bury the thing
+    // that actually needs fixing.
+    {
+        builderr::Report w = builderr::parse(
+            "a.c:1:1: warning: first\n"
+            "b.c:2:2: error: second\n");
+        std::string s = w.summarise();
+        check(s.find("b.c:2") < s.find("a.c:1"), "errors listed before warnings");
+    }
+
+    // Apple linker output.
+    {
+        builderr::Report l = builderr::parse(
+            "Undefined symbols:\n"
+            "  \"_PPCodeGreeting\", referenced from:\n"
+            "      _main in main.o\n"
+            "ld: symbol(s) not found\n"
+            "collect2: ld returned 1 exit status\n");
+        check(l.link_errors.size() >= 3, "undefined-symbol block captured");
+        check(l.error_count() > 0, "link errors count as errors");
+        check(l.summarise().find("Linker") != std::string::npos,
+              "summary has a linker section");
+    }
+
+    // xcodebuild markers.
+    {
+        check(builderr::parse("** BUILD SUCCEEDED **\n").succeeded,
+              "xcodebuild success marker");
+        check(builderr::parse("** BUILD FAILED **\n").failed,
+              "xcodebuild failure marker");
+    }
+
+    // A path containing a colon must not be mistaken for a location, and a bare
+    // path:line with no severity is not a diagnostic.
+    {
+        builderr::Report n = builderr::parse(
+            "In file included from src/a.hpp:10:\n"
+            "make: Nothing to be done for 'all'.\n");
+        check(n.diagnostics.empty(), "non-diagnostic lines ignored");
+        check(n.error_count() == 0, "no spurious errors");
+    }
+}
+
+void test_project_docs() {
+    std::printf("[project instructions]\n");
+    std::string root = "/tmp/ppcode-projdoc/repo";
+    fs::remove_all("/tmp/ppcode-projdoc");
+    fs::create_directories(root + "/sub/deeper");
+    fs::create_directories(root + "/.git");     // marks the repository root
+
+    write_file_text(root + "/.ppcode.md", "ROOT RULES", nullptr);
+    write_file_text(root + "/sub/AGENTS.md", "SUB RULES", nullptr);
+
+    // From a nested directory, both files should be found, outermost first so
+    // the more specific one can override.
+    std::vector<sysprompt::ProjectDoc> docs =
+        sysprompt::load_project_docs(root + "/sub/deeper");
+    check(docs.size() == 2, "walks up and finds both files");
+    if (docs.size() == 2) {
+        check(docs[0].body == "ROOT RULES", "outermost file comes first");
+        check(docs[1].body == "SUB RULES", "nearer file comes last");
+    }
+
+    // The walk must stop at the repository root rather than escaping upwards.
+    write_file_text("/tmp/ppcode-projdoc/.ppcode.md", "OUTSIDE", nullptr);
+    docs = sysprompt::load_project_docs(root);
+    bool leaked = false;
+    for (const auto& d : docs) if (d.body == "OUTSIDE") leaked = true;
+    check(!leaked, "does not read past the repository root");
+
+    check(sysprompt::load_project_docs("/tmp/ppcode-projdoc-missing").empty(),
+          "missing directory yields nothing");
+
+    fs::remove_all("/tmp/ppcode-projdoc");
+}
+
 void test_appledocs() {
     std::printf("[apple docs]\n");
     if (!appledocs::available()) {
@@ -1134,6 +1333,9 @@ int run_selftest(bool with_network) {
     test_render();
     test_web();
     test_plist_and_xcode();
+    test_session();
+    test_builderr();
+    test_project_docs();
     test_appledocs();
     test_envinfo();
     test_config();

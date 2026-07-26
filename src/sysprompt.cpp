@@ -40,6 +40,42 @@ std::vector<std::string> knowledge_dirs() {
     return dirs;
 }
 
+std::vector<ProjectDoc> load_project_docs(const std::string& cwd) {
+    std::vector<ProjectDoc> out;
+    std::error_code ec;
+
+    fs::path dir = cwd.empty() ? fs::current_path(ec) : fs::path(cwd);
+    if (ec) return out;
+
+    // Walk upwards collecting instruction files, stopping at a repository root
+    // so we do not wander into unrelated parents.
+    std::vector<fs::path> chain;
+    for (int depth = 0; depth < 24; depth++) {
+        chain.push_back(dir);
+        std::error_code e2;
+        if (fs::exists(dir / ".git", e2)) break;      // repository root
+        fs::path parent = dir.parent_path();
+        if (parent.empty() || parent == dir) break;
+        dir = parent;
+    }
+    // Outermost first, so a directory-specific file comes last and wins.
+    std::reverse(chain.begin(), chain.end());
+
+    for (const fs::path& d : chain) {
+        for (const char* name : {".ppcode.md", "ppcode.md", "AGENTS.md", "CLAUDE.md"}) {
+            fs::path p = d / name;
+            std::error_code e3;
+            if (!fs::is_regular_file(p, e3)) continue;
+            std::string text;
+            if (!read_file_text(p.string(), &text, nullptr)) continue;
+            if (trim(text).empty()) continue;
+            out.push_back({p.string(), trim(text)});
+            break;   // one file per directory
+        }
+    }
+    return out;
+}
+
 std::vector<Doc> load_docs(std::vector<std::string>* warnings) {
     std::vector<Doc> docs;
     std::vector<std::string> seen;
@@ -189,7 +225,17 @@ Result build(const Inputs& in) {
     }
     out.env_detail = detail;
 
-    // 4. Knowledge documents, highest priority first, until the budget is spent.
+    // 4. Project instructions. These come from the user and describe this
+    //    specific codebase, so they outrank the generic knowledge corpus and are
+    //    added before it competes for the budget.
+    if (in.include_project_docs) {
+        for (const ProjectDoc& pd : load_project_docs(in.cwd)) {
+            text += "\n\n## Project instructions (" + pd.path + ")\n\n" + pd.body + "\n";
+            out.project_docs.push_back(pd.path);
+        }
+    }
+
+    // 5. Knowledge documents, highest priority first, until the budget is spent.
     if (in.include_knowledge && detail != envinfo::Detail::None) {
         std::vector<Doc> docs = load_docs(nullptr);
         size_t used = envinfo::estimate_tokens(text);
