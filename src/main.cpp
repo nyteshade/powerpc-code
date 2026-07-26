@@ -11,6 +11,7 @@
 #include "openrouter.hpp"
 #include "sysprompt.hpp"
 #include "webtools.hpp"
+#include "xcodeproj.hpp"
 #include "selftest.hpp"
 #include "tools.hpp"
 #include "ui.hpp"
@@ -274,6 +275,7 @@ int main(int argc, char** argv) {
     tools.add_extra_builtins(&todos);
     add_job_tools(tools, jobs);
     web::add_tools(tools, web::SearchConfig::from_env());
+    xcode::add_tools(tools);
 
     // MCP servers contribute additional tools. A server that fails to start is
     // reported and skipped -- it must not prevent ppcode from running.

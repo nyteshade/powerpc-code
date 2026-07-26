@@ -11,8 +11,10 @@
 #include "http.hpp"
 #include "job.hpp"
 #include "openrouter.hpp"
+#include "plist.hpp"
 #include "render.hpp"
 #include "tools.hpp"
+#include "xcodeproj.hpp"
 #include "utf8.hpp"
 #include "webtools.hpp"
 #include "yaml.hpp"
@@ -769,6 +771,147 @@ void test_envinfo() {
     check(envinfo::estimate_tokens("abcd") >= 1, "token estimate");
 }
 
+void test_plist_and_xcode() {
+    std::printf("[plist / xcode]\n");
+
+    // A miniature but structurally faithful pbxproj.
+    const std::string src =
+        "// !$*UTF8*$!\n"
+        "{\n"
+        "\tarchiveVersion = 1;\n"
+        "\tobjectVersion = 45;\n"
+        "\trootObject = AAAA /* Project object */;\n"
+        "\tobjects = {\n"
+        "\t\tAAAA /* Project object */ = {\n"
+        "\t\t\tisa = PBXProject;\n"
+        "\t\t\tcompatibilityVersion = \"Xcode 3.1\";\n"
+        "\t\t\tmainGroup = GGGG;\n"
+        "\t\t\tbuildConfigurationList = PCFG;\n"
+        "\t\t\ttargets = ( TTTT /* Demo */, );\n"
+        "\t\t};\n"
+        "\t\tGGGG = { isa = PBXGroup; children = ( FFFF /* main.m */, ); "
+        "sourceTree = \"<group>\"; };\n"
+        "\t\tFFFF /* main.m */ = { isa = PBXFileReference; path = main.m; "
+        "lastKnownFileType = sourcecode.c.objc; sourceTree = \"<group>\"; };\n"
+        "\t\tBBBB /* main.m in Sources */ = { isa = PBXBuildFile; "
+        "fileRef = FFFF /* main.m */; };\n"
+        "\t\tSRCP = { isa = PBXSourcesBuildPhase; files = ( BBBB, ); };\n"
+        "\t\tFWKP = { isa = PBXFrameworksBuildPhase; files = ( ); };\n"
+        "\t\tTTTT /* Demo */ = {\n"
+        "\t\t\tisa = PBXNativeTarget;\n"
+        "\t\t\tname = Demo;\n"
+        "\t\t\tproductType = \"com.apple.product-type.application\";\n"
+        "\t\t\tbuildPhases = ( SRCP, FWKP, );\n"
+        "\t\t\tbuildConfigurationList = TCFG;\n"
+        "\t\t};\n"
+        "\t\tTCFG = { isa = XCConfigurationList; buildConfigurations = ( TDBG, ); };\n"
+        "\t\tTDBG = { isa = XCBuildConfiguration; name = Debug; "
+        "buildSettings = { PRODUCT_NAME = Demo; }; };\n"
+        "\t\tPCFG = { isa = XCConfigurationList; buildConfigurations = ( PDBG, ); };\n"
+        "\t\tPDBG = { isa = XCBuildConfiguration; name = Debug; "
+        "buildSettings = { SDKROOT = macosx10.5; }; };\n"
+        "\t};\n"
+        "}\n";
+
+    std::string err;
+    plist::ValuePtr root = plist::parse(src, &err);
+    check(root != nullptr, "pbxproj parses" + (err.empty() ? "" : ": " + err));
+    if (!root) return;
+
+    check(root->get_string("objectVersion") == "45", "scalar read");
+    check(root->get_string("rootObject") == "AAAA", "reference read");
+    plist::ValuePtr objects = root->get("objects");
+    check(objects && objects->is_dict(), "objects is a dict");
+    check(objects->get("TTTT")->get_string("name") == "Demo", "nested dict read");
+    check(objects->get("SRCP")->get("files")->items.size() == 1, "array read");
+    check(objects->get("FWKP")->get("files")->items.empty(), "empty array read");
+
+    // Quoted strings and the /* comment */ annotations.
+    check(objects->get("AAAA")->get_string("compatibilityVersion") == "Xcode 3.1",
+          "quoted string unescaped");
+    check(objects->get("FFFF")->comment == "main.m", "comment captured");
+
+    // Round-trip: serialise, re-parse, and confirm the structure survives.
+    std::string out = plist::serialize(root, true);
+    check(starts_with(out, "// !$*UTF8*$!"), "serialised with the UTF8 header");
+    check(out.find("/* Begin PBXFileReference section */") != std::string::npos,
+          "objects grouped into isa sections");
+
+    std::string err2;
+    plist::ValuePtr again = plist::parse(out, &err2);
+    check(again != nullptr, "round-trip re-parses" + (err2.empty() ? "" : ": " + err2));
+    if (again) {
+        plist::ValuePtr o2 = again->get("objects");
+        check(o2 && o2->get("TTTT")->get_string("name") == "Demo",
+              "round-trip preserves target name");
+        check(o2->get("PDBG")->get("buildSettings")->get_string("SDKROOT") ==
+                  "macosx10.5",
+              "round-trip preserves build settings");
+        check(o2->entries.size() == objects->entries.size(),
+              "round-trip preserves object count");
+    }
+
+    check(plist::needs_quoting("Xcode 3.1"), "space forces quoting");
+    check(!plist::needs_quoting("macosx10.5"), "plain token needs no quotes");
+    check(plist::quote("a\"b") == "\"a\\\"b\"", "quote escapes a double quote");
+
+    check(xcode::file_type_for("x.m") == "sourcecode.c.objc", "file type for .m");
+    check(xcode::file_type_for("x.cpp") == "sourcecode.cpp.cpp", "file type for .cpp");
+    check(xcode::file_type_for("x.xib") == "file.xib", "file type for .xib");
+    check(xcode::is_source_extension("a.m") && !xcode::is_source_extension("a.h"),
+          "headers are not compiled");
+
+    // Exercise the mutations against a temporary project on disk.
+    std::string dir = "/tmp/ppcode-xcode-test/Demo.xcodeproj";
+    fs::remove_all("/tmp/ppcode-xcode-test");
+    fs::create_directories(dir);
+    write_file_text(dir + "/project.pbxproj", src, nullptr);
+
+    xcode::Project p;
+    check(p.load("/tmp/ppcode-xcode-test", &err), "project loads from a directory");
+    check(p.targets().size() == 1, "one target found");
+    if (!p.targets().empty()) {
+        check(p.targets()[0].name == "Demo", "target name");
+        check(p.targets()[0].source_files.size() == 1, "target sources listed");
+    }
+    check(p.describe().find("Demo") != std::string::npos, "describe mentions the target");
+
+    check(p.add_file("Extra.m", "Demo", "", &err),
+          "add_file succeeds" + (err.empty() ? "" : ": " + err));
+    check(!p.add_file("Extra.m", "Demo", "", &err),
+          "adding the same file twice is refused");
+    check(p.add_framework("WebKit", "Demo", &err),
+          "add_framework succeeds" + (err.empty() ? "" : ": " + err));
+    check(p.set_setting("ARCHS", "ppc", "Demo", "", false, &err),
+          "set_setting succeeds" + (err.empty() ? "" : ": " + err));
+    check(p.save(&err), "project saves" + (err.empty() ? "" : ": " + err));
+
+    // Reload and confirm every edit is really there and still consistent.
+    xcode::Project p2;
+    check(p2.load("/tmp/ppcode-xcode-test", &err), "modified project reloads");
+    std::vector<xcode::Target> ts = p2.targets();
+    check(!ts.empty(), "target survives the rewrite");
+    if (!ts.empty()) {
+        bool has_extra = false;
+        for (const std::string& f : ts[0].source_files) if (f == "Extra.m") has_extra = true;
+        check(has_extra, "added file is in the sources phase");
+
+        bool has_fw = false;
+        for (const std::string& f : ts[0].frameworks)
+            if (f.find("WebKit") != std::string::npos) has_fw = true;
+        check(has_fw, "framework is in the frameworks phase");
+
+        bool has_archs = false;
+        for (const xcode::BuildConfig& c : ts[0].configs)
+            for (const auto& [k, v] : c.settings)
+                if (k == "ARCHS" && v == "ppc") has_archs = true;
+        check(has_archs, "build setting is present after reload");
+    }
+    check(fs::exists(dir + "/project.pbxproj.ppcode-bak"), "a backup was written");
+
+    fs::remove_all("/tmp/ppcode-xcode-test");
+}
+
 void test_config() {
     std::printf("[config]\n");
     std::vector<std::string> warn;
@@ -852,6 +995,7 @@ int run_selftest(bool with_network) {
     test_multimodal();
     test_render();
     test_web();
+    test_plist_and_xcode();
     test_envinfo();
     test_config();
     test_agent_offline();
