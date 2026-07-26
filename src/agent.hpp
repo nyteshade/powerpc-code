@@ -8,8 +8,15 @@
 #include "tools.hpp"
 
 #include <atomic>
+#include <mutex>
 
 namespace ppcode {
+
+// A tool result beginning with this marker, followed by a path and a newline,
+// asks the agent loop to show that image to the model. Used by the screenshot
+// tool; the image is delivered as a separate user message because tool results
+// are text-only on most providers.
+inline constexpr const char* kAttachImageMarker = "PPCODE_ATTACH_IMAGE:";
 
 class Agent {
 public:
@@ -60,6 +67,14 @@ public:
     // Continue without adding a user message (used after /compact or to resume).
     RunResult run_continuation(const Events& ev, std::atomic<bool>* cancel = nullptr);
 
+    // Steering: additional user input supplied while a turn is already running.
+    // It is injected between rounds -- after the current round's tool results,
+    // before the next model call -- so the model can be redirected without
+    // cancelling and losing the work already done. Safe to call from another
+    // thread; the TUI calls it from the input loop while the worker runs.
+    void queue_steering(const std::string& text);
+    bool has_pending_steering() const;
+
     std::vector<Message>& history() { return history_; }
     const std::vector<Message>& history() const { return history_; }
 
@@ -93,6 +108,11 @@ private:
     Usage session_usage_;
     std::string system_override_;
     bool cost_warned_ = false;
+
+    mutable std::mutex steering_mu_;
+    std::vector<std::string> pending_steering_;
+    // Drain anything queued into the conversation. Returns what it injected.
+    std::vector<std::string> take_steering();
 
     RunResult loop(const Events& ev, std::atomic<bool>* cancel);
     void ensure_system_prompt();

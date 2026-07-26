@@ -1,5 +1,7 @@
 #include "agent.hpp"
 
+#include "attach.hpp"
+
 #include <cstdio>
 #include <cstring>
 #include <unistd.h>
@@ -65,11 +67,39 @@ Agent::RunResult Agent::run_continuation(const Events& ev, std::atomic<bool>* ca
     return loop(ev, cancel);
 }
 
+void Agent::queue_steering(const std::string& text) {
+    if (trim(text).empty()) return;
+    std::lock_guard<std::mutex> lk(steering_mu_);
+    pending_steering_.push_back(text);
+}
+
+bool Agent::has_pending_steering() const {
+    std::lock_guard<std::mutex> lk(steering_mu_);
+    return !pending_steering_.empty();
+}
+
+std::vector<std::string> Agent::take_steering() {
+    std::lock_guard<std::mutex> lk(steering_mu_);
+    std::vector<std::string> out;
+    out.swap(pending_steering_);
+    return out;
+}
+
 Agent::RunResult Agent::loop(const Events& ev, std::atomic<bool>* cancel) {
     RunResult res;
     std::vector<ToolSpec> specs = tools_.specs();
 
     for (int round = 0; round < cfg_.max_turns; round++) {
+        // Steering injected while the previous round was running. This happens
+        // at the top of a round -- after the last round's tool results are in
+        // the history, and before the next model call -- so the conversation
+        // stays well-formed and the model sees the correction immediately.
+        for (const std::string& s : take_steering()) {
+            history_.push_back(Message::user(s));
+            if (ev.on_status) ev.on_status("steering applied");
+            log_line("steering: " + elide(s, 120));
+        }
+
         if (cancel && cancel->load()) {
             res.cancelled = true;
             res.error = "cancelled";
@@ -132,8 +162,11 @@ Agent::RunResult Agent::loop(const Events& ev, std::atomic<bool>* cancel) {
         if (ev.on_assistant_message) ev.on_assistant_message(cr.message);
         if (!cr.message.content.empty()) res.final_text = cr.message.content;
 
-        // No tool calls: the turn is complete.
+        // No tool calls: the turn is complete -- unless steering arrived while
+        // the model was answering, in which case keep going so the correction is
+        // not silently dropped.
         if (cr.message.tool_calls.empty()) {
+            if (has_pending_steering()) continue;
             res.ok = true;
             return res;
         }
@@ -180,7 +213,40 @@ Agent::RunResult Agent::loop(const Events& ev, std::atomic<bool>* cancel) {
             }
 
             if (ev.on_tool_done) ev.on_tool_done(tc, tr);
-            history_.push_back(Message::tool_result(tc.id, tc.name, tr.content));
+
+            // A tool can ask for an image to be shown to the model by prefixing
+            // its result with this marker -- the screenshot tool does. The image
+            // travels as a separate user message rather than inside the tool
+            // result, because tool messages are text-only across most providers.
+            std::string content = tr.content;
+            std::string image_path;
+            if (starts_with(content, kAttachImageMarker)) {
+                size_t nl = content.find('\n');
+                image_path = trim(content.substr(std::strlen(kAttachImageMarker),
+                                                 nl == std::string::npos
+                                                     ? std::string::npos
+                                                     : nl - std::strlen(kAttachImageMarker)));
+                content = (nl == std::string::npos) ? "" : content.substr(nl + 1);
+            }
+
+            history_.push_back(Message::tool_result(tc.id, tc.name, content));
+
+            if (!image_path.empty()) {
+                std::vector<std::string> warn;
+                attach::Loaded l = attach::load(image_path, "image", "auto",
+                                                true, cwd_);
+                Message m;
+                m.role = "user";
+                if (l.ok) {
+                    m.parts.push_back(ContentPart::make_text(
+                        "Here is the image the " + tc.name + " tool produced:"));
+                    m.parts.push_back(l.part);
+                } else {
+                    m.content = "[the " + tc.name + " tool produced an image that "
+                                "could not be attached: " + l.error + "]";
+                }
+                history_.push_back(std::move(m));
+            }
 
             log_line("tool " + tc.name + (tr.is_error ? " -> error" : " -> ok"));
         }

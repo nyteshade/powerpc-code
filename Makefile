@@ -50,8 +50,13 @@ lint:
 dirs:
 	@mkdir -p build
 
+# Link to a temporary name and rename into place. Writing directly over a binary
+# that is currently executing fails with ETXTBSY, and rebuilding while ppcode is
+# running is a normal thing to do. rename(2) is atomic and leaves the running
+# process on its old inode, so it keeps working until it exits.
 $(BIN): $(OBJS)
-	$(CXX) $(LDFLAGS) $(OBJS) $(LIBS) -o $@
+	$(CXX) $(LDFLAGS) $(OBJS) $(LIBS) -o $@.tmp
+	@mv -f $@.tmp $@
 	@echo "built $@"
 
 build/%.o: src/%.cpp | dirs

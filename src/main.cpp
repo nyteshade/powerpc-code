@@ -7,6 +7,7 @@
 #include "headless.hpp"
 #include "http.hpp"
 #include "job.hpp"
+#include "macgui.hpp"
 #include "jobs.hpp"
 #include "mcp.hpp"
 #include "openrouter.hpp"
@@ -299,6 +300,16 @@ int main(int argc, char** argv) {
     web::add_tools(tools, web::SearchConfig::from_env());
     xcode::add_tools(tools);
     if (appledocs::available()) appledocs::add_tools(tools);
+
+    // Screenshot tooling is only worth advertising if there is a screen to
+    // capture. Whether the model can actually see the result changes the tool's
+    // description, so look the model up first.
+    if (macgui::screencapture_available()) {
+        ModelCatalog vision_cat;
+        vision_cat.load(client, nullptr);
+        const ModelInfo* vm = vision_cat.find(cfg.model);
+        macgui::add_tools(tools, vm ? vm->supports_images : false);
+    }
 
     // MCP servers contribute additional tools. A server that fails to start is
     // reported and skipped -- it must not prevent ppcode from running.

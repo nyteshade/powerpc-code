@@ -315,6 +315,7 @@ private:
     bool utf8_ok_ = false;
     bool approving_ = false;
     bool needs_redraw_ = true;
+    int steering_queued_ = 0;
 
     // Cached wrap of the transcript.
     std::vector<render::Line> wrapped_;
@@ -475,11 +476,14 @@ void Tui::draw_transcript(int top, int height, int width) {
 void Tui::draw_status(int row, int width) {
     std::string left;
     if (approving_) {
-        left = "APPROVE?  y=yes  n=no  a=allow all  ESC=no";
+        left = "APPROVE?  type y / n / a then Enter   (Ctrl+Y yes, Ctrl+N no)";
     } else if (busy_.load()) {
         static const char* frames = "|/-\\";
         left = std::string(1, frames[spinner_ % 4]) + " " +
-               (status_text_.empty() ? "working" : status_text_) + "  (Ctrl+C cancels)";
+               (status_text_.empty() ? "working" : status_text_);
+        if (steering_queued_ > 0)
+            left += "  [" + std::to_string(steering_queued_) + " queued]";
+        left += "  (type to steer, Ctrl+C cancels)";
     } else if (!follow_) {
         left = "scrolled up " + std::to_string(scroll_) +
                " lines -- End or PgDn to return";
@@ -766,6 +770,7 @@ void Tui::finish_worker() {
     busy_.store(false);
     approving_ = false;
     status_text_.clear();
+    steering_queued_ = 0;
 }
 
 void Tui::pump_events() {
@@ -956,7 +961,10 @@ bool Tui::handle_slash(const std::string& line) {
             "  /quit           exit\n"
             "\n"
             "Keys:\n"
-            "  Enter send, Ctrl+J newline, Ctrl+C cancel, Ctrl+D quit\n"
+            "  Enter send. While the model is working, Enter queues a steering\n"
+            "    message that is injected after the current step.\n"
+            "  Ctrl+J newline, Ctrl+C cancel, Ctrl+D quit\n"
+            "  At an approval prompt: type y, n or a then Enter (Ctrl+Y / Ctrl+N)\n"
             "  PgUp/PgDn scroll, Shift+Up/Down scroll a line, Home/End of input\n"
             "  Ctrl+Home top of transcript, Ctrl+End live tail\n"
             "  Mouse wheel scrolls the transcript\n"
@@ -1147,6 +1155,24 @@ void Tui::submit() {
     follow_ = true;
     scroll_ = 0;
 
+    // Typing while the model is working steers it rather than being ignored:
+    // the text is queued and injected between rounds, so a wrong turn can be
+    // corrected without cancelling and throwing away the work so far.
+    if (busy_.load()) {
+        std::string t = trim(line);
+        if (starts_with(t, "/")) {
+            add(Kind::Error,
+                "slash commands cannot run while a turn is in progress; "
+                "press Ctrl+C first");
+            return;
+        }
+        agent_.queue_steering(line);
+        add(Kind::User, line);
+        add(Kind::Status, "queued -- will be sent to the model after this step");
+        steering_queued_++;
+        return;
+    }
+
     add(Kind::User, line);
     if (starts_with(trim(line), "/")) {
         handle_slash(trim(line));
@@ -1171,23 +1197,65 @@ bool Tui::handle_mouse() {
 
 void Tui::handle_key(int ch) {
     if (approving_) {
+        // Answering is line-based, exactly like every other input here.
+        //
+        // Single-letter hotkeys were tried and cannot work: at the moment the
+        // first key arrives there is no way to tell "a" meaning approve-all from
+        // the "A" that begins "Actually, stop and do X instead". The letter was
+        // silently swallowed and the tool silently approved. So letters are
+        // always text, and answering uses either a typed line or a control key
+        // that cannot occur in prose.
         bool decided = false, allow = false;
-        if (ch == 'y' || ch == 'Y') { decided = true; allow = true; }
-        else if (ch == 'n' || ch == 'N' || ch == 27) { decided = true; allow = false; }
-        else if (ch == 'a' || ch == 'A') {
-            cfg_.yolo = true;
-            decided = true;
-            allow = true;
-            add(Kind::Info, "approving all tools for the rest of this session");
-        } else if (ch == 3) {
+
+        if (ch == KEY_MOUSE) { handle_mouse(); return; }
+        if (ch == KEY_PPAGE) { scroll_by(10); return; }
+        if (ch == KEY_NPAGE) { scroll_by(-10); return; }
+
+        if (ch == 3) {                          // Ctrl+C: deny and cancel
             cancel_.store(true);
             decided = true;
             allow = false;
-        } else if (ch == KEY_MOUSE) {
-            handle_mouse();
+        } else if (ch == 25) {                  // Ctrl+Y: yes
+            decided = true;
+            allow = true;
+        } else if (ch == 14 || ch == 27) {      // Ctrl+N or Esc: no
+            decided = true;
+            allow = false;
+        } else if (ch == '\r' || ch == KEY_ENTER) {
+            std::string answer = to_lower(trim(ed_.text));
+            if (answer == "y" || answer == "yes") {
+                ed_.clear();
+                decided = true;
+                allow = true;
+            } else if (answer == "n" || answer == "no") {
+                ed_.clear();
+                decided = true;
+                allow = false;
+            } else if (answer == "a" || answer == "all" || answer == "always") {
+                ed_.clear();
+                cfg_.yolo = true;
+                decided = true;
+                allow = true;
+                add(Kind::Info, "approving all tools for the rest of this session");
+            } else if (!answer.empty()) {
+                // Anything else is a steering message. The tool is still
+                // waiting, so say so rather than leaving it looking hung.
+                submit();
+                add(Kind::Status,
+                    "still waiting on the approval above -- y, n, or a then Enter");
+                return;
+            } else {
+                return;   // bare Enter does nothing while a prompt is up
+            }
+        } else {
+            // Every other key edits the line, so a correction can be composed
+            // while the prompt is up.
+            bool was = approving_;
+            approving_ = false;
+            handle_key(ch);
+            approving_ = was;
             return;
-        } else if (ch == KEY_PPAGE) { scroll_by(10); return; }
-        else if (ch == KEY_NPAGE)   { scroll_by(-10); return; }
+        }
 
         if (decided) {
             {
@@ -1220,7 +1288,9 @@ void Tui::handle_key(int ch) {
             return;
         case '\r':
         case KEY_ENTER:
-            if (!busy_.load()) submit();
+            // Always submit: while busy this queues steering rather than
+            // starting a second turn.
+            submit();
             return;
         case KEY_BACKSPACE:
         case 127:
