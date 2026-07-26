@@ -26,7 +26,10 @@ here. Always do a `--dry` first if anything about the build has changed.
 4. **Gates.** It will not tag or publish unless all of these pass:
    - `./build/ppcode --selftest`
    - `./build/ppcode-gui --check`
-   - `otool -L` on the bundled executable shows no `/opt/local` paths
+   - `otool -L` shows no `/opt/local` in *any* of the three shipped binaries:
+     the application, the tool inside it, and the standalone tool
+   - the standalone tool actually runs, which linking correctly does not by
+     itself prove
 5. Packages, tags, pushes, and creates the GitHub release with notes.
 
 The third gate is the important one — see below.
@@ -45,30 +48,41 @@ plain version.
 Choosing the number: patch for fixes, minor for new capability, major only on a
 deliberate break. Everything is pre-1.0, so minor is the usual bump.
 
-## The two artifacts, and why they differ
+## The two artifacts
 
 | Artifact | Prerequisites |
 | --- | --- |
 | `ppcode-<v>-ppc-macos10.5-app.tar.gz` | **none** |
-| `ppcode-<v>-ppc-macos10.5-cli.tar.gz` | MacPorts `curl`, `ncurses`, `gcc15` |
+| `ppcode-<v>-ppc-macos10.5-cli.tar.gz` | **none** |
 
 The binaries link four MacPorts dylibs directly, and libcurl drags in a further
-thirteen for TLS, HTTP/2, compression and IDN — **seventeen in total**. A bundle
-that just copies the executable dyld-errors on any machine without MacPorts, so
-`gmake app` runs `scripts/bundle_dylibs.sh`, which walks the dependency closure,
-copies everything under `/opt/local` into `Contents/Frameworks`, and rewrites the
-install names to `@executable_path/../Frameworks`.
+thirteen for TLS, HTTP/2, compression and IDN — **seventeen in total**. Anything
+shipped without them dyld-errors on a machine that has never seen MacPorts, so
+`scripts/bundle_dylibs.sh` walks the dependency closure, copies it in beside the
+executable, and rewrites the install names to a path relative to the executable:
 
-`Contents/Resources/ppcode` — the CLI copy that the Settings window installs into
-`~/bin` — is **deliberately left alone**. Once it leaves the bundle
-`@executable_path` points somewhere else, so rewriting it would break the one
-thing it exists for. That is why the CLI tarball still needs MacPorts.
+- `--app  build/ppcode.app` → `@executable_path/../Frameworks`, covering
+  `Contents/MacOS/ppcode` **and** `Contents/Resources/ppcode`.
+- `--tree build/ppcode-cli` → `@executable_path/../lib`, for `bin/ppcode`.
 
-Do not "fix" this by rewriting the Resources copy.
+### Why the CLI is linked, never copied
+
+`bin/ppcode` finds its libraries at `../lib` relative to itself, so copying the
+bare executable elsewhere strands it. Both installers therefore **symlink**:
+`install.sh` in the tarball, and the Settings window for the copy inside the
+bundle.
+
+That works because Leopard's dyld resolves `@executable_path` *through* a
+symlink — verified with `DYLD_PRINT_LIBRARIES=1`, which shows the bundled copies
+being loaded through the link. It also means the installed tool is updated
+whenever the application is, and that replacing a link in use is safe where
+overwriting a running executable is not.
+
+If you change this, keep the link. A copy of the bare executable cannot work.
 
 ## MacPorts prerequisites
 
-For people building from source or running the bare CLI:
+Only for building from source — nothing shipped needs them at runtime:
 
 ```sh
 ./scripts/macports_prereqs.sh          # list, and check what is installed

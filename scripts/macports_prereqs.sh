@@ -4,14 +4,13 @@
 #
 # WHO NEEDS THIS
 #
-# Not the people who download ppcode.app. That bundle carries its own copy of
-# every MacPorts library it links (see scripts/bundle_dylibs.sh), so it runs on
-# a stock 10.5 machine with nothing installed.
+# Nobody who downloads a release. Both the application and the command line
+# distribution carry their own copies of every MacPorts library they link (see
+# scripts/bundle_dylibs.sh), so they run on a stock 10.5 machine with nothing
+# installed.
 #
-# This is for two other cases:
-#   * building ppcode from source, which needs the compiler as well;
-#   * the ppcode command line tool, which is deliberately left linked against
-#     /opt/local so that installing it into ~/bin keeps working.
+# This is only for building ppcode from source, which additionally needs the
+# compiler.
 #
 #   ./scripts/macports_prereqs.sh              list what is required
 #   ./scripts/macports_prereqs.sh --pkg [DIR]  build a double-click .mpkg
@@ -30,9 +29,8 @@ case "${1:-}" in
   *) echo "unknown option: $1" >&2; exit 2 ;;
 esac
 
-# Runtime libraries, then the compiler. gcc15 is build-only, but it is also
-# where libstdc++ and libgcc_s come from, so a machine running the unbundled CLI
-# needs it too.
+# Libraries to link against, then the compiler. All build-time only: what gets
+# shipped carries copies of these.
 RUNTIME_PORTS=(curl ncurses)
 BUILD_PORTS=(gcc15)
 

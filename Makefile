@@ -47,7 +47,7 @@ CORE_OBJS := $(filter-out build/main.o,$(OBJS))
 GUI_BIN   := build/ppcode-gui
 APP       := build/ppcode.app
 
-.PHONY: all clean run install dirs lint gui app
+.PHONY: all clean run install dirs lint gui app cli-dist
 
 all: lint $(BIN)
 
@@ -121,8 +121,35 @@ $(APP): $(GUI_BIN) $(BIN)
 	  '  <key>NSPrincipalClass</key><string>NSApplication</string>' \
 	  '  <key>NSHighResolutionCapable</key><false/>' \
 	  '</dict></plist>' > $(APP)/Contents/Info.plist
-	@sh scripts/bundle_dylibs.sh $(APP)
+	@sh scripts/bundle_dylibs.sh --app $(APP)
 	@echo "built $(APP) ($(VERSION))"
+
+# A self-contained command line distribution: bin/ppcode plus the MacPorts
+# closure in lib/, linked with @executable_path/../lib so it runs from wherever
+# it is untarred. This is what makes the CLI shippable to a machine that has
+# never seen MacPorts.
+CLIDIST := build/ppcode-cli
+
+cli-dist: $(BIN)
+	@rm -rf $(CLIDIST)
+	@mkdir -p $(CLIDIST)/bin $(CLIDIST)/lib
+	@cp $(BIN) $(CLIDIST)/bin/ppcode
+	@sh scripts/bundle_dylibs.sh --tree $(CLIDIST)
+	@cp scripts/cli_install.sh $(CLIDIST)/install.sh
+	@chmod +x $(CLIDIST)/install.sh
+	@printf '%s\n' \
+	  'ppcode $(VERSION) -- PowerPC, Mac OS X 10.5' \
+	  '' \
+	  'Self-contained: bin/ppcode carries its own copies of libcurl, ncurses' \
+	  'and the gcc15 runtime in lib/, so MacPorts is not required.' \
+	  '' \
+	  'Run it from here:      ./bin/ppcode --help' \
+	  'Or put it on PATH:     ./install.sh [directory, default ~/bin]' \
+	  '' \
+	  'install.sh symlinks bin/ppcode rather than copying it, so keep this' \
+	  'directory where it is. Delete the symlink to uninstall.' \
+	  > $(CLIDIST)/README.txt
+	@echo "built $(CLIDIST) ($(VERSION))"
 
 clean:
 	rm -rf build

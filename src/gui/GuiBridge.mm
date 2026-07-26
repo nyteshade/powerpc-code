@@ -553,33 +553,32 @@ static ppcode::json ObjCToJson(id o) {
     return NO;
   }
   std::string d = Cpp(dir);
-  std::string s = Cpp(src);
   std::string dest = d + "/ppcode";
 
+  // Resolve the bundle path before linking to it, so the link does not depend
+  // on the application's current working directory.
   std::error_code ec;
+  std::filesystem::path s = std::filesystem::absolute(Cpp(src), ec);
+  if (ec) s = Cpp(src);
+
   std::filesystem::create_directories(d, ec);
 
-  // Copy to a temporary name and rename, so replacing a copy that is
-  // currently running does not fail with ETXTBSY.
-  std::string tmp = dest + ".new";
-  std::filesystem::copy_file(s, tmp,
-                             std::filesystem::copy_options::overwrite_existing, ec);
+  // A symlink, not a copy.
+  //
+  // The tool inside the bundle finds its libraries at
+  // @executable_path/../Frameworks, and Leopard's dyld resolves
+  // @executable_path through a symlink -- verified with DYLD_PRINT_LIBRARIES.
+  // So a link keeps working without MacPorts, while a copy of the bare
+  // executable would land somewhere with no Frameworks directory beside it and
+  // fail to launch. Linking also means the tool is updated whenever the
+  // application is, and replacing a link that is in use is safe where
+  // overwriting a running executable is not.
+  std::filesystem::remove(dest, ec);
+  std::filesystem::create_symlink(s, dest, ec);
   if (ec) {
     if (err)
-        *err = [NSString stringWithFormat:@"Could not write to %@: %s",
+        *err = [NSString stringWithFormat:@"Could not link into %@: %s",
                           dir, ec.message().c_str()];
-
-    return NO;
-  }
-  std::filesystem::permissions(tmp,
-      std::filesystem::perms::owner_all | std::filesystem::perms::group_read |
-      std::filesystem::perms::group_exec | std::filesystem::perms::others_read |
-      std::filesystem::perms::others_exec,
-      std::filesystem::perm_options::replace, ec);
-  std::filesystem::rename(tmp, dest, ec);
-  if (ec) {
-    std::filesystem::remove(tmp, ec);
-    if (err) *err = @"Could not replace the existing command line tool.";
 
     return NO;
   }

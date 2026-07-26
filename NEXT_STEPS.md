@@ -120,8 +120,6 @@ rather than guessed at.
   and the only §3.5 item left. `--check` and `--shot` cover construction and
   rendering, but neither drives `-streamDelta:` with real deltas.
 - **`xib` connection editing** was deliberately not implemented — see §4.
-- The **CLI inside the .app is not self-contained**, on purpose. See the release
-  skill; do not "fix" it.
 
 ---
 
@@ -211,10 +209,15 @@ automation permission and not yours to flip.
 `./scripts/release.sh 0.3.0` does the whole thing; `.claude/skills/release`
 documents it. `VERSION` at the root is the only place the number lives.
 
-The `.app` is self-contained: `gmake app` runs `scripts/bundle_dylibs.sh`, which
-copies the seventeen-library MacPorts closure into `Contents/Frameworks` and
-rewrites the install names. The release will not publish if anything in the
-bundle still links `/opt/local`.
+**Nothing shipped needs MacPorts.** `gmake app` and `gmake cli-dist` both run
+`scripts/bundle_dylibs.sh`, which copies the seventeen-library closure in beside
+the executable and rewrites the install names relative to it. The release will
+not publish unless all three shipped binaries are clean of `/opt/local` and the
+standalone tool actually runs.
+
+The CLI is always **symlinked**, never copied — it finds its libraries at a path
+relative to itself, and Leopard's dyld resolves `@executable_path` through a
+symlink. MacPorts is now only needed to build from source.
 
 ---
 

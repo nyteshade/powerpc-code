@@ -74,7 +74,8 @@ rsync -az --delete --exclude 'build/' --exclude '.git/' -e ssh ./ "$HOST:$DEST/"
 echo ">> clean build on $HOST"
 ssh "$HOST" "cd '$DEST' && /opt/local/bin/gmake clean >/dev/null && \
              /opt/local/bin/gmake -j2 && /opt/local/bin/gmake gui && \
-             /opt/local/bin/gmake app" 2>&1 | grep -E 'built|bundled|MISSING|error' || true
+             /opt/local/bin/gmake app && /opt/local/bin/gmake cli-dist" 2>&1 |
+  grep -E 'built|bundled|MISSING|error' || true
 
 echo ">> selftest"
 ssh "$HOST" "cd '$DEST' && ./build/ppcode --selftest" | tail -1
@@ -90,11 +91,24 @@ if ! ssh "$HOST" "cd '$DEST' && ./build/ppcode-gui --check >/dev/null 2>&1"; the
   exit 1
 fi
 
-# The bundle is only worth shipping if it carries its own libraries; a release
-# that dyld-errors on a stock machine is worse than no release.
-echo ">> verifying the bundle is self-contained"
-if ssh "$HOST" "cd '$DEST' && /opt/local/bin/otool -L build/ppcode.app/Contents/MacOS/ppcode | grep -q '/opt/local'"; then
-  echo "bundle still links /opt/local; not releasing." >&2
+# Everything shipped must carry its own libraries. A release that dyld-errors
+# on a stock machine is worse than no release, so this covers all three
+# executables: the application, the tool inside it, and the standalone tool.
+echo ">> verifying every shipped binary is self-contained"
+for exe in build/ppcode.app/Contents/MacOS/ppcode \
+           build/ppcode.app/Contents/Resources/ppcode \
+           build/ppcode-cli/bin/ppcode; do
+  if ssh "$HOST" "cd '$DEST' && /opt/local/bin/otool -L '$exe' | grep -q '/opt/local'"; then
+    echo "$exe still links /opt/local; not releasing." >&2
+    exit 1
+  fi
+  echo "   ok $exe"
+done
+
+# And it must actually run, which linking correctly does not by itself prove.
+echo ">> smoke-testing the standalone tool"
+if ! ssh "$HOST" "cd '$DEST' && ./build/ppcode-cli/bin/ppcode --version >/dev/null 2>&1"; then
+  echo "the standalone tool does not run; not releasing." >&2
   exit 1
 fi
 
@@ -106,7 +120,7 @@ CLI_TGZ="ppcode-$VERSION-ppc-macos10.5-cli.tar.gz"
 echo ">> packaging"
 ssh "$HOST" "cd '$DEST/build' && \
   tar czf '$APP_TGZ' ppcode.app && \
-  tar czf '$CLI_TGZ' ppcode"
+  tar czf '$CLI_TGZ' ppcode-cli"
 
 mkdir -p dist
 scp -q "$HOST:$DEST/build/$APP_TGZ" "$HOST:$DEST/build/$CLI_TGZ" dist/
@@ -123,16 +137,27 @@ trap 'rm -f "$NOTES_FILE"' EXIT
   echo "| File | What it is | Prerequisites |"
   echo "| --- | --- | --- |"
   echo "| \`$APP_TGZ\` | the Cocoa application | **none** |"
-  echo "| \`$CLI_TGZ\` | the \`ppcode\` terminal tool | MacPorts \`curl\`, \`ncurses\`, \`gcc15\` |"
+  echo "| \`$CLI_TGZ\` | the \`ppcode\` terminal tool | **none** |"
   echo
-  echo "The application bundle carries its own copy of every MacPorts library it"
-  echo "links -- libcurl and its TLS, HTTP/2, compression and IDN dependencies,"
-  echo "plus gcc15's libstdc++ and libgcc_s. It runs on a stock 10.5 machine."
+  echo "**Neither download needs MacPorts.** Both carry their own copies of the"
+  echo "seventeen libraries involved -- libcurl with its TLS, HTTP/2, compression"
+  echo "and IDN dependencies, ncurses, and the gcc15 runtime -- linked relative to"
+  echo "the executable, so they run on a stock 10.5 machine."
   echo
-  echo "The command line tool is deliberately left linked against \`/opt/local\`,"
-  echo "so that installing it into \`~/bin\` from the Settings window keeps working."
-  echo "Run \`scripts/macports_prereqs.sh\` for what it needs, or"
-  echo "\`scripts/macports_prereqs.sh --pkg\` to build a double-click installer."
+  echo "The command line tool untars to a directory you can keep anywhere:"
+  echo
+  echo '```sh'
+  echo "tar xzf $CLI_TGZ"
+  echo "./ppcode-cli/bin/ppcode --help"
+  echo "./ppcode-cli/install.sh          # symlink it into ~/bin"
+  echo '```'
+  echo
+  echo "It is linked rather than copied because the tool finds its libraries at"
+  echo "\`../lib\` relative to itself, so keep the directory where you put it."
+  echo "The Settings window installs the copy inside the application the same way."
+  echo
+  echo "MacPorts (\`curl\`, \`ncurses\`, \`gcc15\`) is still needed to *build* from"
+  echo "source; see \`scripts/macports_prereqs.sh\`."
   echo
   echo "### Verified on this build"
   echo

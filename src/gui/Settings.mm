@@ -461,10 +461,12 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
   [v addSubview:MakePush(@"Install", NSMakeRect(346, r, 90, 26), self,
                          @selector(installCLI:))];
 
-  r = NextRow(&y, kLineH, 6);
-  [v addSubview:MakeNote(@"Adds the ppcode command to that directory. Make sure "
-                          "it is on your PATH.",
-                         NSMakeRect(116, r, 380, kLineH))];
+  r = NextRow(&y, 2 * kLineH, 6);
+  [v addSubview:MakeNote(@"Links the ppcode command into that directory, so it "
+                          "updates whenever this application does. Keep the "
+                          "application where it is, and make sure the directory "
+                          "is on your PATH.",
+                         NSMakeRect(116, r, 380, 2 * kLineH))];
 
   r = NextRow(&y, kLabelH, 20);
   [v addSubview:MakeSection(@"MacPorts", NSMakeRect(20, r, 200, kLabelH))];
@@ -637,8 +639,12 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 
   NSString *prefix = [bridge macportsPrefix];
   if (!prefix) {
-    [portStatus setStringValue:@"MacPorts was not found. ppcode needs its curl "
-                                "and OpenSSL for network access."];
+    // No longer a problem: everything shipped carries its own libraries.
+    // MacPorts only matters for building from source.
+    [portStatus setStringValue:@"MacPorts was not found. That is fine \x2d\x2d this "
+                                "application carries its own copies of curl, "
+                                "OpenSSL and ncurses. MacPorts is only needed to "
+                                "build ppcode from source."];
   }
 
   else {
