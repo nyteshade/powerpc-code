@@ -13,11 +13,21 @@
 CXX       := g++-mp-15
 OPT       ?= -O1
 
+# The single source of truth for the version. Everything -- --version, the
+# bundle's Info.plist, the release tag -- reads it from here, so they cannot
+# drift. Bump the VERSION file, or use scripts/release.sh.
+VERSION   := $(shell cat VERSION 2>/dev/null || echo 0.0.0)
+# deploy.sh writes .build-rev on the machine with the git checkout; the G5 copy
+# has no .git, so this is empty for a build made straight on the G5.
+BUILD_REV := $(shell cat .build-rev 2>/dev/null)
+
 PORTS_INC := /opt/local/include
 PORTS_LIB := /opt/local/lib
 
 CXXFLAGS  := -std=c++23 -fPIC $(OPT) -Wall -Wextra -Wno-unused-parameter \
              -D_DARWIN_C_SOURCE \
+             -DPPCODE_VERSION='"$(VERSION)"' \
+             -DPPCODE_BUILD_REV='"$(BUILD_REV)"' \
              -Ithird_party -Isrc -I$(PORTS_INC)
 LDFLAGS   := -L$(PORTS_LIB) -Wl,-search_paths_first
 LIBS      := -lcurl -lncurses -lpthread
@@ -102,8 +112,8 @@ $(APP): $(GUI_BIN) $(BIN)
 	  '  <key>CFBundleDisplayName</key><string>ppcode</string>' \
 	  '  <key>CFBundleExecutable</key><string>ppcode</string>' \
 	  '  <key>CFBundleIdentifier</key><string>me.nyteshade.ppcode</string>' \
-	  '  <key>CFBundleVersion</key><string>0.1.0</string>' \
-	  '  <key>CFBundleShortVersionString</key><string>0.1.0</string>' \
+	  '  <key>CFBundleVersion</key><string>$(VERSION)$(if $(BUILD_REV),+g$(BUILD_REV),)</string>' \
+	  '  <key>CFBundleShortVersionString</key><string>$(VERSION)</string>' \
 	  '  <key>CFBundlePackageType</key><string>APPL</string>' \
 	  '  <key>CFBundleSignature</key><string>????</string>' \
 	  '  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>' \
@@ -111,7 +121,8 @@ $(APP): $(GUI_BIN) $(BIN)
 	  '  <key>NSPrincipalClass</key><string>NSApplication</string>' \
 	  '  <key>NSHighResolutionCapable</key><false/>' \
 	  '</dict></plist>' > $(APP)/Contents/Info.plist
-	@echo "built $(APP)"
+	@sh scripts/bundle_dylibs.sh $(APP)
+	@echo "built $(APP) ($(VERSION))"
 
 clean:
 	rm -rf build

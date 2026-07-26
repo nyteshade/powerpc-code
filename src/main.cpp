@@ -17,6 +17,7 @@
 #include "session.hpp"
 #include "subagent.hpp"
 #include "sysprompt.hpp"
+#include "version.hpp"
 #include "webtools.hpp"
 #include "xcodeproj.hpp"
 #include "xib.hpp"
@@ -269,8 +270,8 @@ int main(int argc, char** argv) {
     }
 
     if (want_version) {
-        std::printf("ppcode 0.1.0 (powerpc-apple-darwin9) %s\n",
-                    http::version_string().c_str());
+        std::printf("ppcode %s (powerpc-apple-darwin9) %s\n",
+                    version_full().c_str(), http::version_string().c_str());
         return 0;
     }
 

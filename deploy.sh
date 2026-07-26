@@ -29,6 +29,17 @@ done
 
 here="$(cd "$(dirname "$0")" && pwd)"
 
+# The G5 copy has no .git, so the revision has to be recorded here, where the
+# checkout actually is, and carried across with the source. The Makefile folds
+# it into --version and the bundle's CFBundleVersion.
+if git -C "$here" rev-parse --short HEAD >/dev/null 2>&1; then
+  rev="$(git -C "$here" rev-parse --short HEAD)"
+  if ! git -C "$here" diff --quiet HEAD 2>/dev/null; then
+    rev="${rev}-dirty"
+  fi
+  printf '%s\n' "$rev" > "$here/.build-rev"
+fi
+
 echo ">> syncing to ${HOST}:${DEST}"
 ssh "$HOST" "mkdir -p '$DEST'"
 rsync -az --delete \

@@ -6,3 +6,5 @@ build/
 # Probe cache and saved sessions
 .ppcode-cache.json
 *.session.json
+.build-rev
+dist/
