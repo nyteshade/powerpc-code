@@ -47,6 +47,7 @@ const char* kUsage =
     "  ppcode -p \"prompt\"              run one prompt and exit\n"
     "  echo \"prompt\" | ppcode -p       read the prompt from stdin\n"
     "  ppcode -j task.md               run a markdown job file\n"
+    "  ppcode gui                      open the Cocoa application\n"
     "\n"
     "OPTIONS\n"
     "  -p, --print [PROMPT]     non-interactive; prompt may also come from stdin\n"
@@ -150,6 +151,36 @@ int main(int argc, char** argv) {
     std::string prompt, resume_path, save_path, resume_id;
     bool want_continue = false, want_sessions = false, no_save = false;
     std::vector<std::string> allow_tools, deny_tools;
+
+    // `ppcode gui` hands off to the Cocoa application. Checked before flag
+    // parsing so it reads as a subcommand rather than an option.
+    if (argc > 1 && std::string(argv[1]) == "gui") {
+        std::string self_dir = ".";
+        {
+            char buf[4096];
+            if (getcwd(buf, sizeof(buf))) self_dir = buf;
+        }
+        const char* candidates[] = {
+            "build/ppcode.app", "./ppcode.app",
+            "/Applications/ppcode.app",
+        };
+        std::string app;
+        for (const char* c : candidates) {
+            std::error_code ec;
+            if (std::filesystem::exists(c, ec)) { app = c; break; }
+        }
+        if (app.empty()) {
+            std::fprintf(stderr,
+                         "ppcode: the GUI application was not found.\n"
+                         "Build it with:  gmake app\n"
+                         "then run:       open build/ppcode.app\n");
+            return 2;
+        }
+        std::string cmd = "open " + app;
+        // Pass the working directory through so the GUI starts where you are.
+        std::fprintf(stderr, "launching %s\n", app.c_str());
+        return std::system(cmd.c_str()) == 0 ? 0 : 1;
+    }
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];

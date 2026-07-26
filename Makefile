@@ -27,9 +27,23 @@ OBJS      := $(patsubst src/%.cpp,build/%.o,$(SRCS))
 DEPS      := $(OBJS:.o=.d)
 BIN       := build/ppcode
 
-.PHONY: all clean run install dirs lint
+# The Cocoa front end. Objective-C++ so it can hold the C++ engine directly --
+# verified working with gcc15 at C++23 against Leopard's AppKit.
+GUI_SRCS  := $(wildcard src/gui/*.mm)
+GUI_OBJS  := $(patsubst src/gui/%.mm,build/gui/%.o,$(GUI_SRCS))
+GUI_DEPS  := $(GUI_OBJS:.o=.d)
+# Everything except main.cpp: the GUI supplies its own entry point.
+CORE_OBJS := $(filter-out build/main.o,$(OBJS))
+GUI_BIN   := build/ppcode-gui
+APP       := build/ppcode.app
+
+.PHONY: all clean run install dirs lint gui app
 
 all: lint $(BIN)
+
+gui: lint $(GUI_BIN)
+
+app: $(APP)
 
 # This process ends up with two C++ runtimes (libcurl -> CoreServices ->
 # /usr/lib/libstdc++.6.dylib, alongside gcc15's). Darwin coalesces weak symbols
@@ -48,7 +62,7 @@ lint:
 	fi
 
 dirs:
-	@mkdir -p build
+	@mkdir -p build build/gui
 
 # Link to a temporary name and rename into place. Writing directly over a binary
 # that is currently executing fails with ETXTBSY, and rebuilding while ppcode is
@@ -62,6 +76,40 @@ $(BIN): $(OBJS)
 build/%.o: src/%.cpp | dirs
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
+build/gui/%.o: src/gui/%.mm | dirs
+	$(CXX) $(CXXFLAGS) -x objective-c++ -MMD -MP -c $< -o $@
+
+$(GUI_BIN): $(CORE_OBJS) $(GUI_OBJS)
+	$(CXX) $(LDFLAGS) $(CORE_OBJS) $(GUI_OBJS) $(LIBS) -framework Cocoa -o $@.tmp
+	@mv -f $@.tmp $@
+	@echo "built $@"
+
+# A real application bundle, so it can be double-clicked and appears in the Dock
+# with a name rather than as a bare executable.
+$(APP): $(GUI_BIN)
+	@rm -rf $(APP)
+	@mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
+	@cp $(GUI_BIN) $(APP)/Contents/MacOS/ppcode
+	@printf '%s' 'APPL????' > $(APP)/Contents/PkgInfo
+	@printf '%s\n' \
+	  '<?xml version="1.0" encoding="UTF-8"?>' \
+	  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+	  '<plist version="1.0"><dict>' \
+	  '  <key>CFBundleName</key><string>ppcode</string>' \
+	  '  <key>CFBundleDisplayName</key><string>ppcode</string>' \
+	  '  <key>CFBundleExecutable</key><string>ppcode</string>' \
+	  '  <key>CFBundleIdentifier</key><string>me.nyteshade.ppcode</string>' \
+	  '  <key>CFBundleVersion</key><string>0.1.0</string>' \
+	  '  <key>CFBundleShortVersionString</key><string>0.1.0</string>' \
+	  '  <key>CFBundlePackageType</key><string>APPL</string>' \
+	  '  <key>CFBundleSignature</key><string>????</string>' \
+	  '  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>' \
+	  '  <key>LSMinimumSystemVersion</key><string>10.5</string>' \
+	  '  <key>NSPrincipalClass</key><string>NSApplication</string>' \
+	  '  <key>NSHighResolutionCapable</key><false/>' \
+	  '</dict></plist>' > $(APP)/Contents/Info.plist
+	@echo "built $(APP)"
+
 clean:
 	rm -rf build
 
@@ -71,3 +119,4 @@ install: $(BIN)
 	@echo "installed to $(HOME)/bin/ppcode"
 
 -include $(DEPS)
+-include $(GUI_DEPS)
