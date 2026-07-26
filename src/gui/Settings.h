@@ -59,4 +59,8 @@
 - (id)initWithBridge:(PPBridge *)b;
 - (void)showWindow;
 
+// The panel itself, so --shot can render each tab offscreen. Building it is a
+// side effect of asking, which is what makes a headless screenshot possible.
+- (NSWindow *)panelWindow;
+
 @end

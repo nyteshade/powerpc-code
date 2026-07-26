@@ -12,9 +12,13 @@
 #import <Cocoa/Cocoa.h>
 
 #import "GuiBridge.h"
+#import "Markdown.h"
 #import "Settings.h"
 #import "Skin.h"
 
+#include "mdparse.hpp"
+
+#include <string>
 #include <string.h>
 
 // ---------------------------------------------------------------------------
@@ -118,10 +122,19 @@
     PPBridge *bridge;
     PPSettingsController *settings;
     BOOL streaming;
+
+    // Streaming markdown. mdBuffer holds the part of the reply whose block has
+    // not closed yet; previewStart is where its cheap plain rendering begins in
+    // the text storage. See -streamDelta:.
+    NSMutableString *mdBuffer;
+    NSUInteger previewStart;
 }
 - (void)send:(id)sender;
 - (void)attachmentsChanged;
 - (void)showSettings:(id)sender;
+- (void)newConversation:(id)sender;
+- (void)clearTranscript;
+- (void)flushStream;
 - (void)buildWindow;
 - (void)populateModels;
 - (void)reloadSessions;
@@ -131,28 +144,145 @@
 
 // --- transcript helpers ----------------------------------------------------
 
+- (void)clearTranscript {
+  [mdBuffer release];
+  mdBuffer = nil;
+  previewStart = 0;
+  [transcript setString:@""];
+}
+
+- (void)appendAttributed:(NSAttributedString *)as {
+  if (!as || [as length] == 0) { return; }
+
+  [[transcript textStorage] appendAttributedString:as];
+  [transcript scrollRangeToVisible:NSMakeRange([[transcript string] length], 0)];
+}
+
+// Chrome: tool lines, errors, the banner. Not markdown, because none of it
+// comes from the model.
 - (void)append:(NSString *)text
          color:(NSColor *)color
           bold:(BOOL)bold
           mono:(BOOL)mono {
-    if (!text) return;
-    NSFont *font = mono
-        ? [NSFont fontWithName:@"Monaco" size:11.0]
-        : (bold ? [NSFont boldSystemFontOfSize:12.0] : [NSFont systemFontOfSize:12.0]);
-    if (!font) font = [NSFont systemFontOfSize:12.0];
+  if (!text) { return; }
 
-    NSDictionary *attrs = [NSDictionary dictionaryWithObjectsAndKeys:
-                              font, NSFontAttributeName,
-                              color ? color : [NSColor blackColor],
-                                  NSForegroundColorAttributeName, nil];
-    NSAttributedString *as =
-        [[[NSAttributedString alloc] initWithString:text attributes:attrs] autorelease];
+  NSFont *font = mono
+      ? [NSFont fontWithName:@"Monaco" size:11.0]
+      : (bold ? [NSFont boldSystemFontOfSize:12.0] : [NSFont systemFontOfSize:12.0]);
+  if (!font) { font = [NSFont systemFontOfSize:12.0]; }
 
-    [[transcript textStorage] appendAttributedString:as];
-    [transcript scrollRangeToVisible:NSMakeRange([[transcript string] length], 0)];
+  NSDictionary *attrs = [NSDictionary dictionaryWithObjectsAndKeys:
+                            font, NSFontAttributeName,
+                            color ? color : [NSColor blackColor],
+                                NSForegroundColorAttributeName,
+                            nil];
+
+  [self appendAttributed:[[[NSAttributedString alloc] initWithString:text
+                                                         attributes:attrs]
+                             autorelease]];
 }
 
-- (void)appendPlain:(NSString *)t { [self append:t color:nil bold:NO mono:NO]; }
+- (void)appendPlain:(NSString *)t {
+  [self append:t color:nil bold:NO mono:NO];
+}
+
+// A complete piece of markdown, rendered in one go. Used for replayed sessions
+// and anywhere the whole text is already in hand.
+- (void)appendMarkdown:(NSString *)text {
+  if (!text) { return; }
+
+  const char *utf8 = [text UTF8String];
+  [self appendAttributed:PPAttributedFromMarkdown(utf8 ? std::string(utf8)
+                                                       : std::string())];
+}
+
+// --- streaming markdown ----------------------------------------------------
+//
+// Re-rendering the whole reply on every delta would have a G5 re-highlighting
+// the same code block hundreds of times. Instead the tail whose block has not
+// closed yet is shown as plain text -- which is a pure append, so it costs
+// nothing -- and only when md::complete_prefix() reports a closed block is that
+// prefix replaced with its real rendering. Each block is therefore laid out
+// exactly once.
+
+- (void)replacePreviewWith:(NSAttributedString *)as {
+  NSTextStorage *store = [transcript textStorage];
+  if (previewStart > [store length]) { previewStart = [store length]; }
+
+  NSRange preview = NSMakeRange(previewStart, [store length] - previewStart);
+  [store deleteCharactersInRange:preview];
+
+  if (as && [as length]) { [store appendAttributedString:as]; }
+}
+
+- (void)streamDelta:(NSString *)delta {
+  if (!delta || [delta length] == 0) { return; }
+
+  if (!mdBuffer) {
+    mdBuffer = [[NSMutableString alloc] init];
+    previewStart = [[transcript textStorage] length];
+  }
+
+  [mdBuffer appendString:delta];
+
+  // The cheap part: extend the plain preview by exactly what arrived.
+  [self appendAttributed:
+      [[[NSAttributedString alloc] initWithString:delta
+                                       attributes:PPMarkdownStreamAttributes()]
+          autorelease]];
+
+  const char *utf8 = [mdBuffer UTF8String];
+  if (!utf8) { return; }
+
+  std::string buffer(utf8);
+  size_t done = ppcode::md::complete_prefix(buffer);
+  if (done == 0) { return; }
+
+  // One or more blocks closed: render them for real and keep the remainder as
+  // preview.
+  std::string settled = buffer.substr(0, done);
+  std::string rest = buffer.substr(done);
+
+  NSMutableAttributedString *replacement =
+      [[[NSMutableAttributedString alloc] init] autorelease];
+  [replacement appendAttributedString:PPAttributedFromMarkdown(settled)];
+  NSUInteger settledLength = [replacement length];
+
+  if (!rest.empty()) {
+    NSString *tail = [NSString stringWithUTF8String:rest.c_str()];
+    if (tail) {
+      [replacement appendAttributedString:
+          [[[NSAttributedString alloc] initWithString:tail
+                                           attributes:PPMarkdownStreamAttributes()]
+              autorelease]];
+    }
+  }
+
+  [self replacePreviewWith:replacement];
+  previewStart += settledLength;
+
+  [mdBuffer setString:(rest.empty() ? @""
+                                    : [NSString stringWithUTF8String:rest.c_str()])];
+  [transcript scrollRangeToVisible:NSMakeRange([[transcript string] length], 0)];
+}
+
+// Render whatever is left and stop streaming. Must run before any chrome is
+// written, or the tool output would land inside the buffered markdown.
+- (void)flushStream {
+  streaming = NO;
+  if (!mdBuffer) { return; }
+
+  if ([mdBuffer length]) {
+    const char *utf8 = [mdBuffer UTF8String];
+    [self replacePreviewWith:
+        PPAttributedFromMarkdown(utf8 ? std::string(utf8) : std::string())];
+  }
+
+  [mdBuffer release];
+  mdBuffer = nil;
+  previewStart = [[transcript textStorage] length];
+  [transcript scrollRangeToVisible:NSMakeRange([[transcript string] length], 0)];
+}
 
 // --- lifecycle -------------------------------------------------------------
 
@@ -415,7 +545,7 @@
 - (void)newConversation:(id)sender {
     if ([bridge isBusy]) return;
     [bridge newConversation];
-    [transcript setString:@""];
+    [self clearTranscript];
     [self appendPlain:@"New conversation.\n\n"];
     [self reloadSessions];
 }
@@ -436,7 +566,7 @@
     objectValueForTableColumn:(NSTableColumn *)c
                           row:(NSInteger)row {
     NSDictionary *s = [sessions objectAtIndex:(NSUInteger)row];
-    return [NSString stringWithFormat:@"%@\n%@ · %@ msg",
+    return [NSString stringWithFormat:PPUTF8("%@\n%@ \xC2\xB7 %@ msg"),
                      [s objectForKey:@"title"], [s objectForKey:@"age"],
                      [s objectForKey:@"messages"]];
 }
@@ -447,7 +577,7 @@
     NSDictionary *s = [sessions objectAtIndex:(NSUInteger)row];
     if (![bridge loadSessionWithId:[s objectForKey:@"id"]]) return;
 
-    [transcript setString:@""];
+    [self clearTranscript];
     NSEnumerator *te = [[bridge transcript] objectEnumerator];
     NSDictionary *m;
     while ((m = [te nextObject]) != nil) {
@@ -465,8 +595,15 @@
                                                                        alpha:1.0]
                     bold:YES mono:NO];
         }
-        [self appendPlain:[m objectForKey:@"text"]];
-        [self appendPlain:@"\n"];
+        // The model's own turns are markdown; what the user typed is not.
+        if ([role isEqualToString:@"user"]) {
+            [self appendPlain:[m objectForKey:@"text"]];
+            [self appendPlain:@"\n"];
+        }
+
+        else {
+            [self appendMarkdown:[m objectForKey:@"text"]];
+        }
     }
 }
 
@@ -475,7 +612,7 @@
 - (void)bridgeDidStart {
     streaming = NO;
     [spinner startAnimation:nil];
-    [statusField setStringValue:@"Thinking…"];
+    [statusField setStringValue:PPUTF8("Thinking\xE2\x80\xA6")];
 }
 
 - (void)bridgeDidReceiveText:(NSString *)delta {
@@ -487,15 +624,18 @@
                                                                    alpha:1.0]
                 bold:YES mono:NO];
     }
-    [self appendPlain:delta];
+    [self streamDelta:delta];
 }
 
 - (void)bridgeDidStartTool:(NSString *)name detail:(NSString *)detail {
-    streaming = NO;
-    [self append:[NSString stringWithFormat:@"\n  ● %@  %@\n", name, detail]
+    // Settle the markdown first, or this line lands inside the buffered reply.
+    [self flushStream];
+    [self append:[NSString stringWithFormat:PPUTF8("\n  \xE2\x97\x8F %@  %@\n"),
+                     name, detail]
            color:[NSColor colorWithCalibratedRed:0.55 green:0.4 blue:0.0 alpha:1.0]
             bold:NO mono:YES];
-    [statusField setStringValue:[NSString stringWithFormat:@"Running %@…", name]];
+    [statusField setStringValue:
+        [NSString stringWithFormat:PPUTF8("Running %@\xE2\x80\xA6"), name]];
 }
 
 - (void)bridgeDidFinishTool:(NSString *)name
@@ -506,7 +646,7 @@
     NSString *body = [[lines subarrayWithRange:NSMakeRange(0, show)]
                          componentsJoinedByString:@"\n"];
     if ([lines count] > show)
-        body = [body stringByAppendingFormat:@"\n    … %lu more lines",
+        body = [body stringByAppendingFormat:PPUTF8("\n    \xE2\x80\xA6 %lu more lines"),
                      (unsigned long)([lines count] - show)];
 
     [self append:[NSString stringWithFormat:@"%@\n", body]
@@ -519,15 +659,17 @@
 }
 
 - (void)bridgeDidError:(NSString *)message {
+    [self flushStream];
     [self append:[NSString stringWithFormat:@"\n%@\n", message]
            color:[NSColor redColor] bold:YES mono:NO];
 }
 
 - (void)bridgeDidFinishTurnWithTokens:(long long)tokens cost:(double)cost {
-    streaming = NO;
+    [self flushStream];
     [spinner stopAnimation:nil];
     [statusField setStringValue:
-        [NSString stringWithFormat:@"Ready · %lld tokens · $%.4f", tokens, cost]];
+        [NSString stringWithFormat:
+            PPUTF8("Ready \xC2\xB7 %lld tokens \xC2\xB7 $%.4f"), tokens, cost]];
     [self appendPlain:@"\n"];
     [self reloadSessions];
 }
@@ -550,7 +692,15 @@
 
 // ---------------------------------------------------------------------------
 
-static void buildMenuBar(void) {
+// `target` receives the application's own actions. The standard AppKit ones
+// (hide:, terminate:, cut:, copy: ...) keep a nil target on purpose so they
+// travel the responder chain to whatever is first responder.
+//
+// The application's own actions must not: with a nil target AppKit resolves
+// them through -targetForAction:, finds nothing it is willing to use, disables
+// the item, and a disabled item ignores its key equivalent. That is why
+// Command-comma did nothing while calling -showSettings: directly worked.
+static void buildMenuBar(id target) {
   // AppKit decides which menu is the application menu, and without being told
   // it synthesises an empty one of its own -- which is why the name appeared
   // twice, once bold and empty and once with the real items. -setAppleMenu: is
@@ -569,9 +719,12 @@ static void buildMenuBar(void) {
               keyEquivalent:@""];
   [appMenu addItem:[NSMenuItem separatorItem]];
 
-  [[appMenu addItemWithTitle:@"Settings…"
-                      action:@selector(showSettings:)
-               keyEquivalent:@","] setKeyEquivalentModifierMask:NSCommandKeyMask];
+  NSMenuItem *settingsItem =
+      [appMenu addItemWithTitle:PPUTF8("Settings\xE2\x80\xA6")
+                         action:@selector(showSettings:)
+                  keyEquivalent:@","];
+  [settingsItem setKeyEquivalentModifierMask:NSCommandKeyMask];
+  [settingsItem setTarget:target];
   [appMenu addItem:[NSMenuItem separatorItem]];
 
   NSMenuItem *services = [appMenu addItemWithTitle:@"Services"
@@ -609,9 +762,9 @@ static void buildMenuBar(void) {
   NSMenuItem *fileItem = [bar addItemWithTitle:@"" action:NULL keyEquivalent:@""];
   NSMenu *fileMenu = [[[NSMenu alloc] initWithTitle:@"File"] autorelease];
 
-  [fileMenu addItemWithTitle:@"New Conversation"
-                      action:@selector(newConversation:)
-               keyEquivalent:@"n"];
+  [[fileMenu addItemWithTitle:@"New Conversation"
+                       action:@selector(newConversation:)
+                keyEquivalent:@"n"] setTarget:target];
   [fileMenu addItem:[NSMenuItem separatorItem]];
   [fileMenu addItemWithTitle:@"Close"
                       action:@selector(performClose:)
@@ -657,10 +810,35 @@ static void countViews(NSView *v, NSMutableDictionary *tally) {
     while ((sub = [e nextObject]) != nil) countViews(sub, tally);
 }
 
-static void buildMenuBar(void);
+// Render a view hierarchy to a PNG without it ever reaching the screen.
+//
+// screencapture cannot do this job. Run over SSH it has no access to the
+// console framebuffer and returns a uniformly black frame -- not an error, a
+// convincing-looking black image -- whether or not the display is awake.
+// -cacheDisplayInRect: draws the views into an offscreen bitmap instead, so
+// this works with the display asleep, needs no root, and never touches the
+// accessibility API.
+static BOOL writeViewPNG(NSView *view, NSString *path) {
+  if (!view) { return NO; }
+
+  NSRect bounds = [view bounds];
+  if (bounds.size.width < 1.0 || bounds.size.height < 1.0) { return NO; }
+
+  NSBitmapImageRep *rep = [view bitmapImageRepForCachingDisplayInRect:bounds];
+  if (!rep) { return NO; }
+
+  [view cacheDisplayInRect:bounds toBitmapImageRep:rep];
+
+  NSData *png = [rep representationUsingType:NSPNGFileType properties:nil];
+  if (!png) { return NO; }
+
+  return [png writeToFile:path atomically:YES];
+}
 
 @interface PPController (SelfCheck)
 - (int)runSelfCheck;
+- (int)writeShotsTo:(NSString *)dir;
+- (void)installSampleTranscript;
 @end
 
 @implementation PPController (SelfCheck)
@@ -725,8 +903,199 @@ static void buildMenuBar(void);
         printf("  ok   menu bar has %d menus\n", (int)[[NSApp mainMenu] numberOfItems]);
     }
 
+    // A menu item whose action resolves nowhere is silently disabled, and a
+    // disabled item ignores its key equivalent -- which is exactly how
+    // Command-comma came to do nothing. Check the wiring, not just the shape.
+    NSMenu *appMenu = [[[NSApp mainMenu] itemAtIndex:0] submenu];
+    NSMenuItem *settingsItem = nil;
+    for (NSInteger i = 0; i < [appMenu numberOfItems]; i++) {
+        NSMenuItem *it = [appMenu itemAtIndex:i];
+        if ([it action] == @selector(showSettings:)) settingsItem = it;
+    }
+    if (!settingsItem) {
+        printf("  FAIL no Settings menu item\n");
+        failures++;
+    } else {
+        id t = [settingsItem target];
+        BOOL wired = (t != nil) && [t respondsToSelector:@selector(showSettings:)];
+        printf("  %-4s Settings item targets a responder\n", wired ? "ok" : "FAIL");
+        if (!wired) failures++;
+
+        BOOL hasKey = [[settingsItem keyEquivalent] isEqualToString:@","] &&
+                      ([settingsItem keyEquivalentModifierMask] & NSCommandKeyMask);
+        printf("  %-4s Settings item bound to Command-comma\n", hasKey ? "ok" : "FAIL");
+        if (!hasKey) failures++;
+    }
+
+    // Non-ASCII inside an @"..." literal becomes garbage under GCC, and the
+    // symptom is cosmetic enough to ship unnoticed. Every menu title must
+    // survive a UTF-8 round trip.
+    int badTitles = 0;
+    for (NSInteger i = 0; i < [[NSApp mainMenu] numberOfItems]; i++) {
+        NSMenu *sub = [[[NSApp mainMenu] itemAtIndex:i] submenu];
+        for (NSInteger j = 0; j < [sub numberOfItems]; j++) {
+            NSString *title = [[sub itemAtIndex:j] title];
+            const char *utf8 = [title UTF8String];
+            if (!utf8) { badTitles++; continue; }
+            if (![title isEqualToString:[NSString stringWithUTF8String:utf8]])
+                badTitles++;
+        }
+    }
+    printf("  %-4s menu titles survive a UTF-8 round trip\n",
+           badTitles == 0 ? "ok" : "FAIL");
+    if (badTitles) failures++;
+
     printf("\n%s\n", failures == 0 ? "all checks passed" : "CHECKS FAILED");
     return failures == 0 ? 0 : 1;
+}
+
+// A document exercising every block the renderer knows, so a screenshot is a
+// real check on §3.1 rather than a picture of an empty window.
+- (void)installSampleTranscript {
+  [self clearTranscript];
+  [self appendMarkdown:PPUTF8(
+      "# Markdown check\n"
+      "\n"
+      "Body text with **bold**, *italic*, ***both***, `inline_code()`, "
+      "~~struck out~~ and a [link](http://openrouter.ai) plus a bare URL "
+      "http://example.com/path.\n"
+      "\n"
+      "Identifiers such as read_file_text and MAX__VALUE must not turn italic.\n"
+      "\n"
+      "## Lists\n"
+      "\n"
+      "- first item\n"
+      "- second item, long enough that it has to wrap onto another line so the "
+      "hanging indent can be seen working properly\n"
+      "  - nested item\n"
+      "    - deeper still\n"
+      "\n"
+      "1. ordered one\n"
+      "2. ordered two\n"
+      "\n"
+      "> A blockquote, which should be indented and set in italic.\n"
+      "> - even a list inside it\n"
+      "\n"
+      "### Code\n"
+      "\n"
+      "```objc\n"
+      "// Objective-C is the primary language here.\n"
+      "@implementation PPThing\n"
+      "\n"
+      "- (NSString *)describe:(NSInteger)count {\n"
+      "  NSString *s = [NSString stringWithFormat:@\"%ld items\", (long)count];\n"
+      "\n"
+      "  return s ? s : nil;\n"
+      "}\n"
+      "\n"
+      "@end\n"
+      "```\n"
+      "\n"
+      "| Setting | Default | Notes |\n"
+      "| --- | --- | --- |\n"
+      "| model | glm-5.2 | pinned |\n"
+      "| caching | on | ~30% cheaper |\n"
+      "\n"
+      "---\n"
+      "\n"
+      "Final paragraph after a rule.\n")];
+}
+
+- (int)writeShotsTo:(NSString *)dir {
+  // --check may already have built everything; building twice would leave two
+  // windows and two bridges behind.
+  if (!window) {
+    bridge = [[PPBridge alloc] init];
+    [bridge setDelegate:self];
+    [self buildWindow];
+    [self populateModels];
+    [self reloadSessions];
+  }
+
+  [self installSampleTranscript];
+
+  [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                             withIntermediateDirectories:YES
+                                              attributes:nil
+                                                   error:NULL];
+
+  int failures = 0;
+  printf("ppcode gui offscreen shots -> %s\n\n", [dir UTF8String]);
+
+  NSString *main = [dir stringByAppendingPathComponent:@"main-window.png"];
+  if (writeViewPNG([window contentView], main)) {
+    printf("  ok   main-window.png\n");
+  }
+
+  else {
+    printf("  FAIL main-window.png\n");
+    failures++;
+  }
+
+  // The transcript again, grown to its full laid-out height. The window only
+  // ever shows one screenful, and a rendering bug is just as likely to be in
+  // the part that is scrolled out of view.
+  {
+    NSRect saved = [transcript frame];
+    NSLayoutManager *lm = [transcript layoutManager];
+    NSTextContainer *tc = [transcript textContainer];
+    [lm ensureLayoutForTextContainer:tc];
+
+    NSRect used = [lm usedRectForTextContainer:tc];
+    CGFloat height = used.size.height + 2 * [transcript textContainerInset].height + 8;
+    [transcript setFrame:NSMakeRect(saved.origin.x, saved.origin.y,
+                                    saved.size.width, height)];
+    [transcript setNeedsDisplay:YES];
+
+    NSString *full = [dir stringByAppendingPathComponent:@"transcript-full.png"];
+    if (writeViewPNG(transcript, full)) {
+      printf("  ok   transcript-full.png  (%.0fx%.0f)\n", saved.size.width, height);
+    }
+
+    else {
+      printf("  FAIL transcript-full.png\n");
+      failures++;
+    }
+
+    [transcript setFrame:saved];
+  }
+
+  // Each settings tab, which is the only way to see the layout of a pane that
+  // is not frontmost.
+  if (!settings) { settings = [[PPSettingsController alloc] initWithBridge:bridge]; }
+
+  NSWindow *panel = [settings panelWindow];
+  NSTabView *tabs = nil;
+  NSEnumerator *se = [[[panel contentView] subviews] objectEnumerator];
+  NSView *sub;
+  while ((sub = [se nextObject]) != nil)
+    if ([sub isKindOfClass:[NSTabView class]]) tabs = (NSTabView *)sub;
+
+  if (!tabs) {
+    printf("  FAIL settings tab view not found\n");
+    return failures + 1;
+  }
+
+  for (NSInteger i = 0; i < [tabs numberOfTabViewItems]; i++) {
+    NSTabViewItem *item = [tabs tabViewItemAtIndex:i];
+    [tabs selectTabViewItemAtIndex:i];
+    [[panel contentView] setNeedsDisplay:YES];
+
+    NSString *name = [NSString stringWithFormat:@"settings-%@.png", [item label]];
+    NSString *path = [dir stringByAppendingPathComponent:[name lowercaseString]];
+    if (writeViewPNG([panel contentView], path)) {
+      printf("  ok   %s\n", [[name lowercaseString] UTF8String]);
+    }
+
+    else {
+      printf("  FAIL %s\n", [[name lowercaseString] UTF8String]);
+      failures++;
+    }
+  }
+
+  printf("\n%s\n", failures == 0 ? "shots written" : "SHOTS FAILED");
+
+  return failures == 0 ? 0 : 1;
 }
 
 @end
@@ -735,17 +1104,22 @@ int main(int argc, const char **argv) {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
 
     BOOL selfCheck = NO;
-    for (int i = 1; i < argc; i++)
+    NSString *shotDir = nil;
+    for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--check") == 0) selfCheck = YES;
+        else if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc)
+            shotDir = [NSString stringWithUTF8String:argv[++i]];
+    }
 
     [NSApplication sharedApplication];
 
-    if (selfCheck) {
+    if (selfCheck || shotDir) {
         // Build everything and report, without entering the run loop. This is
         // how the interface gets verified on a machine whose display is asleep.
-        buildMenuBar();
         PPController *c = [[PPController alloc] init];
-        int rc = [c runSelfCheck];
+        buildMenuBar(c);
+        int rc = selfCheck ? [c runSelfCheck] : 0;
+        if (shotDir && rc == 0) rc = [c writeShotsTo:shotDir];
         [pool release];
         return rc;
     }
@@ -753,9 +1127,8 @@ int main(int argc, const char **argv) {
     // -setActivationPolicy: is 10.6 and later. On 10.5 an application inside a
     // bundle is a regular, Dock-visible application already, and one run as a
     // bare executable simply has no Dock tile.
-    buildMenuBar();
-
     PPController *c = [[PPController alloc] init];
+    buildMenuBar(c);
     [NSApp setDelegate:c];
     [NSApp activateIgnoringOtherApps:YES];
     [NSApp run];

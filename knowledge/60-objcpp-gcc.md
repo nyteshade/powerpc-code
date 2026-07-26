@@ -77,6 +77,43 @@ struct EngineState;                // C++ forward declaration
 }
 ```
 
+### Non-ASCII inside an `@"..."` literal comes out as garbage
+
+GCC compiles `@"..."` into an `NSConstantString` wrapping the literal's raw
+bytes, and `NSConstantString` reads those bytes as ASCII. A UTF-8 ellipsis in a
+literal therefore arrives as **three garbage characters**:
+
+```objc
+[item setTitle:@"Settings…"];        // renders as "Settings" + 3 junk glyphs
+```
+
+GCC does warn — `warning: non-ASCII character in CFString literal` — but it is
+easy to miss in a long build, and the damage is cosmetic enough to ship. Build
+anything non-ASCII at runtime from an explicitly UTF-8 C string instead:
+
+```objc
+NSString *PPUTF8(const char *utf8) { return [NSString stringWithUTF8String:utf8]; }
+
+[item setTitle:PPUTF8("Settings\xE2\x80\xA6")];
+```
+
+`ppcode-gui --check` asserts that every menu title survives a UTF-8 round trip,
+so a regression is caught rather than merely warned about. Note also that this
+platform predates any emoji font: even a correctly built emoji string draws as a
+hollow box, so use words.
+
+### A nil-target menu item is silently disabled
+
+An `NSMenuItem` with a nil target has its action resolved through
+`-targetForAction:`. For the application's *own* actions that search can come up
+empty, and AppKit then disables the item — and **a disabled item ignores its key
+equivalent**. The symptom is a menu command that does nothing and a keyboard
+shortcut that does nothing, while calling the same method directly works fine.
+
+Give application actions an explicit `setTarget:`. Leave the standard AppKit
+ones (`hide:`, `terminate:`, `cut:`, `copy:`) with a nil target on purpose, so
+they travel the responder chain to whatever is first responder.
+
 ### Delegate protocols are informal on 10.5
 
 `NSTableViewDataSource`, `NSTableViewDelegate`, `NSTextViewDelegate` and most
@@ -109,9 +146,58 @@ modal loop from the worker.
 
 ### Verifying a GUI on a headless or sleeping machine
 
-`screencapture` returns a solid black frame when the display is asleep, so a
-screenshot proves nothing. Give the application a `--check` mode that builds its
-window, walks the view hierarchy, and prints what it found. That verifies the
-interface was constructed correctly without needing a visible display or the
-accessibility API — which is disabled by default and is a system-wide setting
-you should not enable on someone's machine just to test your own work.
+`screencapture` is useless from an SSH session. It returns a solid black frame —
+mean 0, one colour, no error — and it does so **whether or not the display is
+awake**, because the SSH session cannot read the console framebuffer. Measured on
+this machine with the user watching the application on screen at the time.
+`launchctl bsexec` into the console session needs root and fails with
+`task_for_pid() (os/kern) failure`.
+
+Two things do work:
+
+1. **`--check`**: build the window, walk the view hierarchy, print what was
+   found. Verifies construction and wiring with no display at all.
+2. **`--shot <dir>`**: have the application screenshot *itself*.
+   `-cacheDisplayInRect:toBitmapImageRep:` draws a view hierarchy into an
+   offscreen bitmap, so it works with the display asleep, needs no root, and
+   never touches the accessibility API — which is disabled by default and is a
+   system-wide setting you should not enable on someone's machine just to test
+   your own work.
+
+```objc
+NSBitmapImageRep *rep = [view bitmapImageRepForCachingDisplayInRect:[view bounds]];
+[view cacheDisplayInRect:[view bounds] toBitmapImageRep:rep];
+[[rep representationUsingType:NSPNGFileType properties:nil] writeToFile:path
+                                                            atomically:YES];
+```
+
+Worth capturing a scrolling view at its full laid-out height as well as at window
+size — `usedRectForTextContainer:` gives the height — because a rendering bug is
+just as likely to be in the part scrolled out of view.
+
+### Laying out a pane in code: rectangles grow upward
+
+`NSMakeRect(x, y, w, h)` puts the view's **bottom** edge at `y`, so a view
+occupies `y .. y + h` and grows *up* the window. A top-down layout must move the
+cursor down by a row's full height *before* placing anything in it. Decrement by
+less than the height you then draw, and the new row grows back up through the row
+above — which is what put every description on top of its text field in the
+settings window. Route it through a helper so the mistake cannot recur:
+
+```objc
+static CGFloat NextRow(CGFloat *y, CGFloat height, CGFloat gap) {
+  *y -= (height + gap);
+  return *y;
+}
+```
+
+Separately, an `NSTextField` does **not** wrap by default — a long note is laid
+out as a single line and simply runs off the right edge of the pane.
+`[[field cell] setWraps:YES]`.
+
+### AppKit does not decorate trailing whitespace
+
+A horizontal rule drawn as an underline over a run of spaces renders as nothing:
+underline and strikethrough are skipped on trailing whitespace. A run of U+2500
+depends on the system font having that glyph. Repeated em dashes (U+2014) are in
+every font and butt together into a continuous line.

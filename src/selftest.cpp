@@ -14,6 +14,7 @@
 #include "envinfo.hpp"
 #include "http.hpp"
 #include "job.hpp"
+#include "mdparse.hpp"
 #include "openrouter.hpp"
 #include "plist.hpp"
 #include "render.hpp"
@@ -757,6 +758,206 @@ void test_render() {
         auto lines = render::highlight("    indented = 1", "python", 80);
         check(!lines.empty() && lines[0].plain().find("    indented") == 0,
               "code keeps indentation");
+    }
+}
+
+// The markdown document model behind the Cocoa transcript. It lives in a plain
+// .cpp precisely so it can be tested here rather than only through the GUI.
+void test_mdparse() {
+    std::printf("[mdparse]\n");
+
+    // --- inline ------------------------------------------------------------
+    {
+        auto r = md::parse_inline("plain text");
+        check(r.size() == 1 && r[0].style == 0, "inline plain text is one run");
+    }
+    {
+        auto r = md::parse_inline("a **bold** b");
+        check(r.size() == 3 && r[1].text == "bold" && (r[1].style & md::StyleBold),
+              "**bold**");
+    }
+    {
+        auto r = md::parse_inline("a *it* b");
+        check(r.size() == 3 && r[1].text == "it" && (r[1].style & md::StyleItalic),
+              "*italic*");
+    }
+    {
+        // The reason for not reusing render.cpp's inline_spans: it carries one
+        // Style per span and cannot say bold *and* italic.
+        auto r = md::parse_inline("**b _i_**");
+        bool both = false;
+        for (size_t i = 0; i < r.size(); i++)
+            if (r[i].text == "i" &&
+                (r[i].style & md::StyleBold) && (r[i].style & md::StyleItalic))
+                both = true;
+        check(both, "emphasis nests: bold and italic at once");
+    }
+    {
+        auto r = md::parse_inline("***both***");
+        check(r.size() == 1 && r[0].text == "both" &&
+                  (r[0].style & md::StyleBold) && (r[0].style & md::StyleItalic),
+              "***triple*** is bold and italic, with no stray markers");
+    }
+    {
+        auto r = md::parse_inline("call `foo(1)` now");
+        check(r.size() == 3 && r[1].text == "foo(1)" && (r[1].style & md::StyleCode),
+              "`inline code`");
+    }
+    {
+        auto r = md::parse_inline("``a ` b``");
+        check(r.size() == 1 && r[0].text == "a ` b" && (r[0].style & md::StyleCode),
+              "double-backtick code may contain a backtick");
+    }
+    {
+        // In a coding tool this matters more than catching every emphasis:
+        // identifiers must survive.
+        auto r = md::parse_inline("call read_file_text now");
+        check(r.size() == 1 && r[0].style == 0, "snake_case is not italic");
+        auto r2 = md::parse_inline("MAX__VALUE stays");
+        check(r2.size() == 1 && r2[0].style == 0, "double underscore in a word is literal");
+    }
+    {
+        auto r = md::parse_inline("2 * 3 * 4");
+        check(r.size() == 1 && r[0].style == 0, "spaced asterisks are arithmetic");
+    }
+    {
+        auto r = md::parse_inline("[docs](http://x.y/z)");
+        check(r.size() == 1 && r[0].text == "docs" && (r[0].style & md::StyleLink) &&
+                  r[0].href == "http://x.y/z",
+              "[label](url) keeps the target");
+    }
+    {
+        auto r = md::parse_inline("see http://a.b/c. done");
+        bool ok = false;
+        for (size_t i = 0; i < r.size(); i++)
+            if ((r[i].style & md::StyleLink) && r[i].text == "http://a.b/c") ok = true;
+        check(ok, "bare URL linkified without the trailing full stop");
+    }
+    {
+        auto r = md::parse_inline("\\*not emphasis\\*");
+        check(r.size() == 1 && r[0].text == "*not emphasis*" && r[0].style == 0,
+              "backslash escapes");
+    }
+    {
+        auto r = md::parse_inline("~~gone~~");
+        check(r.size() == 1 && (r[0].style & md::StyleStrike), "~~strikethrough~~");
+    }
+    {
+        // An unterminated marker must not swallow the rest of the message,
+        // which is the common case mid-stream.
+        auto r = md::parse_inline("an unclosed **bold");
+        std::string all;
+        for (size_t i = 0; i < r.size(); i++) all += r[i].text;
+        check(all == "an unclosed **bold", "unterminated emphasis stays literal");
+    }
+
+    // --- blocks ------------------------------------------------------------
+    {
+        auto n = md::parse("# Title\n\nBody.\n");
+        check(n.size() == 2 && n[0].kind == md::Block::Heading && n[0].level == 1 &&
+                  n[1].kind == md::Block::Paragraph,
+              "atx heading then paragraph");
+    }
+    {
+        auto n = md::parse("###### Six\n");
+        check(n.size() == 1 && n[0].level == 6, "heading level 6");
+        auto n2 = md::parse("####### Seven\n");
+        check(n2.size() == 1 && n2[0].kind == md::Block::Paragraph,
+              "seven hashes is not a heading");
+        auto n3 = md::parse("#tag\n");
+        check(n3.size() == 1 && n3[0].kind == md::Block::Paragraph,
+              "#tag is not a heading");
+    }
+    {
+        auto n = md::parse("Title\n=====\n");
+        check(n.size() == 1 && n[0].kind == md::Block::Heading && n[0].level == 1,
+              "setext heading");
+    }
+    {
+        auto n = md::parse("```objc\nNSString *s;\n```\n");
+        check(n.size() == 1 && n[0].kind == md::Block::Code && n[0].lang == "objc" &&
+                  n[0].text == "NSString *s;",
+              "fenced code keeps its language and body");
+    }
+    {
+        // Blank lines inside a fence are content, not block separators.
+        auto n = md::parse("```\na\n\nb\n```\n");
+        check(n.size() == 1 && n[0].text == "a\n\nb",
+              "blank line inside a fence stays in the code");
+    }
+    {
+        auto n = md::parse("para\n\n---\n\npara\n");
+        check(n.size() == 3 && n[1].kind == md::Block::Rule, "thematic break");
+    }
+    {
+        auto n = md::parse("- a\n  - b\n- c\n");
+        check(n.size() == 3 && n[0].kind == md::Block::Bullet && n[0].level == 0 &&
+                  n[1].level == 1 && n[2].level == 0,
+              "list nesting depth from indentation");
+    }
+    {
+        auto n = md::parse("1. first\n2. second\n");
+        check(n.size() == 2 && n[0].kind == md::Block::Numbered && n[0].marker == "1." &&
+                  n[1].marker == "2.",
+              "ordered list keeps its markers");
+    }
+    {
+        auto n = md::parse("- one\n  continued here\n");
+        check(n.size() == 1 && n[0].runs.size() == 1 &&
+                  n[0].runs[0].text == "one continued here",
+              "indented continuation joins the list item");
+    }
+    {
+        // A quote is re-parsed, so quoted structure survives as structure.
+        auto n = md::parse("> - x\n> - y\n");
+        check(n.size() == 2 && n[0].kind == md::Block::Bullet && n[0].quote == 1,
+              "list inside a blockquote stays a list");
+        auto n2 = md::parse("> quoted\n");
+        check(n2.size() == 1 && n2[0].quote == 1 && n2[0].kind == md::Block::Paragraph,
+              "blockquote paragraph");
+    }
+    {
+        auto n = md::parse("| a | b |\n| --- | --- |\n| 1 | 2 |\n");
+        check(n.size() == 2 && n[0].kind == md::Block::TableRow && n[0].header &&
+                  n[0].cells.size() == 2 && !n[1].header && n[1].table_end,
+              "pipe table rows and cells");
+    }
+    {
+        // A pipe in prose is not a table.
+        auto n = md::parse("use a | b in the shell\n");
+        check(n.size() == 1 && n[0].kind == md::Block::Paragraph,
+              "a stray pipe is not a table");
+    }
+    {
+        // A single newline is a space; two trailing spaces is a hard break.
+        auto n = md::parse("one\ntwo\n");
+        check(n.size() == 1 && n[0].runs.size() == 1 && n[0].runs[0].text == "one two",
+              "soft line break becomes a space");
+        auto n2 = md::parse("one  \ntwo\n");
+        check(n2.size() == 1 && n2[0].runs[0].text == "one\ntwo",
+              "two trailing spaces is a hard break");
+    }
+    {
+        auto n = md::parse("");
+        check(n.empty(), "empty input yields no blocks");
+    }
+
+    // --- streaming ---------------------------------------------------------
+    {
+        // complete_prefix is what keeps streaming affordable: only whole blocks
+        // are committed, so a G5 never re-highlights the same code twice.
+        check(md::complete_prefix("para one\n\npara two") == 10,
+              "prefix commits at a blank line");
+        check(md::complete_prefix("no break yet") == 0,
+              "nothing commits without a boundary");
+        check(md::complete_prefix("```\ncode\n\nmore\n") == 0,
+              "a blank line inside a fence does not commit");
+        check(md::complete_prefix("```\nx\n```\n") == 10,
+              "a closed fence commits");
+        std::string doc = "# H\n\n```c\nint x;\n```\n\ntail";
+        size_t p = md::complete_prefix(doc);
+        check(p > 0 && doc.substr(p) == "tail",
+              "prefix leaves only the incomplete trailing block");
     }
 }
 
@@ -1654,6 +1855,7 @@ int run_selftest(bool with_network) {
     test_job();
     test_multimodal();
     test_render();
+    test_mdparse();
     test_web();
     test_plist_and_xcode();
     test_bundler();

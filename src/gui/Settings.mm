@@ -1,6 +1,7 @@
 #import "Settings.h"
 
 #import "GuiBridge.h"
+#import "Markdown.h"
 #import "Skin.h"
 
 // ---------------------------------------------------------------------------
@@ -52,8 +53,44 @@ static NSTextField *MakeNote(NSString *text, NSRect frame) {
     [l setAlignment:NSLeftTextAlignment];
     [l setFont:[NSFont systemFontOfSize:10.0]];
     [l setTextColor:[NSColor darkGrayColor]];
+    // Without this a note is laid out as a single line and simply runs off the
+    // right edge of the pane, which is how the longer ones came to be clipped.
+    [[l cell] setWraps:YES];
+    [[l cell] setScrollable:NO];
     return l;
 }
+
+// A left-aligned bold heading. MakeLabel right-aligns, which is right for a
+// field label and wrong for a section title.
+static NSTextField *MakeSection(NSString *text, NSRect frame) {
+    NSTextField *l = MakeLabel(text, frame, YES);
+    [l setAlignment:NSLeftTextAlignment];
+    return l;
+}
+
+// Reserve the next row going down the pane and return its *bottom* edge.
+//
+// Cocoa rectangles grow upward from their origin, so a top-down layout must
+// move the cursor down by the full height of a row before placing anything in
+// it. Doing that by hand is what put the descriptions on top of the text
+// fields: the cursor was moved 24 points but a 32-point note was then drawn
+// from there, so it grew back up through the field above. Going through this
+// function makes the mistake hard to repeat.
+static CGFloat NextRow(CGFloat *y, CGFloat height, CGFloat gap) {
+    *y -= (height + gap);
+    return *y;
+}
+
+// Vertical nudge so an 18-point label sits centred against a taller control.
+static CGFloat Centred(CGFloat rowBottom, CGFloat rowHeight, CGFloat itemHeight) {
+    return rowBottom + (rowHeight - itemHeight) / 2.0;
+}
+
+static const CGFloat kPaneTop = 288.0;
+static const CGFloat kFieldH = 22.0;
+static const CGFloat kLabelH = 18.0;
+static const CGFloat kPopupH = 24.0;
+static const CGFloat kLineH = 14.0;     // one line of note text
 
 static NSButton *MakeCheck(NSString *title, NSRect frame, id target, SEL action) {
     NSButton *b = [[[NSButton alloc] initWithFrame:frame] autorelease];
@@ -75,6 +112,26 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
     return b;
 }
 
+// Declared up front because the tab builders are used through performSelector:
+// and -buildPanel is defined below its caller.
+@interface PPSettingsController (Private)
+
+- (void)buildPanel;
+
+- (void)load:(id)sender;
+
+- (NSView *)buildKeysTab;
+
+- (NSView *)buildModelTab;
+
+- (NSView *)buildRoutingTab;
+
+- (NSView *)buildMcpTab;
+
+- (NSView *)buildToolsTab;
+
+@end
+
 @implementation PPSettingsController
 
 - (id)initWithBridge:(PPBridge *)b {
@@ -95,45 +152,55 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 
 - (NSView *)buildKeysTab {
     NSView *v = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 300)] autorelease];
-    CGFloat y = 250;
+    CGFloat y = kPaneTop;
+    CGFloat r;
 
-    [v addSubview:MakeLabel(@"OpenRouter key:", NSMakeRect(20, y, 120, 18), YES)];
+    r = NextRow(&y, kFieldH, 0);
+    [v addSubview:MakeLabel(@"OpenRouter key:",
+                            NSMakeRect(20, Centred(r, kFieldH, kLabelH), 120, kLabelH),
+                            YES)];
     openrouterKey = [[[NSSecureTextField alloc]
-        initWithFrame:NSMakeRect(148, y - 2, 340, 22)] autorelease];
+        initWithFrame:NSMakeRect(148, r, 340, kFieldH)] autorelease];
     [v addSubview:openrouterKey];
 
-    y -= 24;
+    r = NextRow(&y, 2 * kLineH, 4);
     [v addSubview:MakeNote(@"Required. Get one at openrouter.ai/keys. Stored in "
                             "your config file with owner-only permissions.",
-                           NSMakeRect(148, y, 350, 32))];
+                           NSMakeRect(148, r, 350, 2 * kLineH))];
 
-    y -= 34;
-    keyStatus = MakeNote(@"", NSMakeRect(148, y, 350, 16));
+    r = NextRow(&y, kLineH, 6);
+    keyStatus = MakeNote(@"", NSMakeRect(148, r, 350, kLineH));
     [v addSubview:keyStatus];
 
-    y -= 36;
+    r = NextRow(&y, 3 * kLineH, 14);
     [v addSubview:MakeNote(@"An application launched from the Finder does not "
                             "inherit your shell environment, so a key exported in "
                             ".zshrc is not visible here. That is why it is set in "
                             "this window instead.",
-                           NSMakeRect(20, y - 12, 470, 40))];
+                           NSMakeRect(20, r, 470, 3 * kLineH))];
 
-    y -= 60;
-    [v addSubview:MakeLabel(@"Web search keys", NSMakeRect(20, y, 120, 18), YES)];
+    r = NextRow(&y, kLabelH, 16);
+    [v addSubview:MakeSection(@"Web search keys", NSMakeRect(20, r, 200, kLabelH))];
+
+    r = NextRow(&y, kLineH, 2);
     [v addSubview:MakeNote(@"Optional. Without one, web_search falls back to "
                             "Wikipedia and instant answers.",
-                           NSMakeRect(148, y, 350, 16))];
+                           NSMakeRect(20, r, 470, kLineH))];
 
-    y -= 26;
-    [v addSubview:MakeLabel(@"Tavily:", NSMakeRect(20, y, 120, 18), NO)];
+    r = NextRow(&y, kFieldH, 8);
+    [v addSubview:MakeLabel(@"Tavily:",
+                            NSMakeRect(20, Centred(r, kFieldH, kLabelH), 120, kLabelH),
+                            NO)];
     tavilyKey = [[[NSSecureTextField alloc]
-        initWithFrame:NSMakeRect(148, y - 2, 340, 22)] autorelease];
+        initWithFrame:NSMakeRect(148, r, 340, kFieldH)] autorelease];
     [v addSubview:tavilyKey];
 
-    y -= 28;
-    [v addSubview:MakeLabel(@"Brave:", NSMakeRect(20, y, 120, 18), NO)];
+    r = NextRow(&y, kFieldH, 6);
+    [v addSubview:MakeLabel(@"Brave:",
+                            NSMakeRect(20, Centred(r, kFieldH, kLabelH), 120, kLabelH),
+                            NO)];
     braveKey = [[[NSSecureTextField alloc]
-        initWithFrame:NSMakeRect(148, y - 2, 340, 22)] autorelease];
+        initWithFrame:NSMakeRect(148, r, 340, kFieldH)] autorelease];
     [v addSubview:braveKey];
 
     return v;
@@ -141,78 +208,97 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 
 - (NSView *)buildModelTab {
     NSView *v = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 300)] autorelease];
-    CGFloat y = 250;
+    CGFloat y = kPaneTop;
+    CGFloat r;
 
-    [v addSubview:MakeLabel(@"Default model:", NSMakeRect(20, y, 120, 18), YES)];
+    r = NextRow(&y, kPopupH, 0);
+    [v addSubview:MakeLabel(@"Default model:",
+                            NSMakeRect(20, Centred(r, kPopupH, kLabelH), 120, kLabelH),
+                            YES)];
     defaultModel = [[[NSPopUpButton alloc]
-        initWithFrame:NSMakeRect(146, y - 4, 344, 24)] autorelease];
+        initWithFrame:NSMakeRect(146, r, 344, kPopupH)] autorelease];
     [v addSubview:defaultModel];
 
-    y -= 34;
-    [v addSubview:MakeLabel(@"Temperature:", NSMakeRect(20, y, 120, 18), NO)];
+    r = NextRow(&y, 20, 12);
+    [v addSubview:MakeLabel(@"Temperature:",
+                            NSMakeRect(20, Centred(r, 20, kLabelH), 120, kLabelH), NO)];
     temperatureSlider = [[[NSSlider alloc]
-        initWithFrame:NSMakeRect(148, y - 2, 250, 20)] autorelease];
+        initWithFrame:NSMakeRect(148, r, 250, 20)] autorelease];
     [temperatureSlider setMinValue:0.0];
     [temperatureSlider setMaxValue:2.0];
     [temperatureSlider setTarget:self];
     [temperatureSlider setAction:@selector(temperatureChanged:)];
     [v addSubview:temperatureSlider];
-    temperatureLabel = MakeNote(@"1.00", NSMakeRect(406, y, 60, 16));
+    temperatureLabel = MakeNote(@"1.00",
+                                NSMakeRect(406, Centred(r, 20, kLineH), 60, kLineH));
     [v addSubview:temperatureLabel];
 
-    y -= 32;
-    [v addSubview:MakeLabel(@"Max tokens:", NSMakeRect(20, y, 120, 18), NO)];
+    r = NextRow(&y, kFieldH, 10);
+    [v addSubview:MakeLabel(@"Max tokens:",
+                            NSMakeRect(20, Centred(r, kFieldH, kLabelH), 120, kLabelH),
+                            NO)];
     maxTokensField = [[[NSTextField alloc]
-        initWithFrame:NSMakeRect(148, y - 2, 90, 22)] autorelease];
+        initWithFrame:NSMakeRect(148, r, 90, kFieldH)] autorelease];
     [v addSubview:maxTokensField];
-    [v addSubview:MakeNote(@"per reply", NSMakeRect(244, y, 120, 16))];
+    [v addSubview:MakeNote(@"per reply",
+                           NSMakeRect(244, Centred(r, kFieldH, kLineH), 200, kLineH))];
 
-    y -= 30;
-    [v addSubview:MakeLabel(@"Max rounds:", NSMakeRect(20, y, 120, 18), NO)];
+    r = NextRow(&y, kFieldH, 8);
+    [v addSubview:MakeLabel(@"Max rounds:",
+                            NSMakeRect(20, Centred(r, kFieldH, kLabelH), 120, kLabelH),
+                            NO)];
     maxTurnsField = [[[NSTextField alloc]
-        initWithFrame:NSMakeRect(148, y - 2, 90, 22)] autorelease];
+        initWithFrame:NSMakeRect(148, r, 90, kFieldH)] autorelease];
     [v addSubview:maxTurnsField];
     [v addSubview:MakeNote(@"tool calls before stopping",
-                           NSMakeRect(244, y, 220, 16))];
+                           NSMakeRect(244, Centred(r, kFieldH, kLineH), 240, kLineH))];
 
-    y -= 30;
-    [v addSubview:MakeLabel(@"Spend limit:", NSMakeRect(20, y, 120, 18), NO)];
+    r = NextRow(&y, kFieldH, 8);
+    [v addSubview:MakeLabel(@"Spend limit:",
+                            NSMakeRect(20, Centred(r, kFieldH, kLabelH), 120, kLabelH),
+                            NO)];
     maxCostField = [[[NSTextField alloc]
-        initWithFrame:NSMakeRect(148, y - 2, 90, 22)] autorelease];
+        initWithFrame:NSMakeRect(148, r, 90, kFieldH)] autorelease];
     [v addSubview:maxCostField];
     [v addSubview:MakeNote(@"US dollars per session; 0 disables it",
-                           NSMakeRect(244, y, 250, 16))];
+                           NSMakeRect(244, Centred(r, kFieldH, kLineH), 250, kLineH))];
 
     return v;
 }
 
 - (NSView *)buildRoutingTab {
     NSView *v = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 300)] autorelease];
-    CGFloat y = 252;
+    CGFloat y = kPaneTop;
+    CGFloat r;
 
-    [v addSubview:MakeLabel(@"Prefer providers by:", NSMakeRect(20, y, 140, 18), YES)];
+    r = NextRow(&y, kPopupH, 0);
+    [v addSubview:MakeLabel(@"Prefer providers by:",
+                            NSMakeRect(20, Centred(r, kPopupH, kLabelH), 140, kLabelH),
+                            YES)];
     providerSort = [[[NSPopUpButton alloc]
-        initWithFrame:NSMakeRect(166, y - 4, 160, 24)] autorelease];
+        initWithFrame:NSMakeRect(166, r, 160, kPopupH)] autorelease];
     [providerSort addItemWithTitle:@"(no preference)"];
     [providerSort addItemWithTitle:@"price"];
     [providerSort addItemWithTitle:@"throughput"];
     [providerSort addItemWithTitle:@"latency"];
     [v addSubview:providerSort];
 
-    y -= 30;
+    r = NextRow(&y, kLabelH, 10);
     allowFallbacks = MakeCheck(@"Allow falling back to other providers",
-                               NSMakeRect(166, y, 320, 18), nil, NULL);
+                               NSMakeRect(166, r, 320, kLabelH), nil, NULL);
     [v addSubview:allowFallbacks];
 
-    y -= 24;
+    r = NextRow(&y, kLabelH, 4);
     denyTraining = MakeCheck(@"Refuse providers that train on my data",
-                             NSMakeRect(166, y, 320, 18), nil, NULL);
+                             NSMakeRect(166, r, 320, kLabelH), nil, NULL);
     [v addSubview:denyTraining];
 
-    y -= 34;
-    [v addSubview:MakeLabel(@"Reasoning effort:", NSMakeRect(20, y, 140, 18), YES)];
+    r = NextRow(&y, kPopupH, 14);
+    [v addSubview:MakeLabel(@"Reasoning effort:",
+                            NSMakeRect(20, Centred(r, kPopupH, kLabelH), 140, kLabelH),
+                            YES)];
     reasoningEffort = [[[NSPopUpButton alloc]
-        initWithFrame:NSMakeRect(166, y - 4, 160, 24)] autorelease];
+        initWithFrame:NSMakeRect(166, r, 160, kPopupH)] autorelease];
     [reasoningEffort addItemWithTitle:@"(model default)"];
     [reasoningEffort addItemWithTitle:@"minimal"];
     [reasoningEffort addItemWithTitle:@"low"];
@@ -220,22 +306,24 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
     [reasoningEffort addItemWithTitle:@"high"];
     [v addSubview:reasoningEffort];
 
-    y -= 36;
+    r = NextRow(&y, kLabelH, 14);
     promptCaching = MakeCheck(@"Cache the system prompt where supported",
-                              NSMakeRect(166, y, 340, 18), nil, NULL);
+                              NSMakeRect(166, r, 340, kLabelH), nil, NULL);
     [v addSubview:promptCaching];
-    y -= 18;
+
+    r = NextRow(&y, 2 * kLineH, 1);
     [v addSubview:MakeNote(@"Measured roughly 30% cheaper on a two-round task, "
                             "and more on longer ones.",
-                           NSMakeRect(184, y - 4, 320, 28))];
+                           NSMakeRect(184, r, 320, 2 * kLineH))];
 
-    y -= 40;
+    r = NextRow(&y, kLabelH, 12);
     webPlugin = MakeCheck(@"Let the model search the web (OpenRouter plugin)",
-                          NSMakeRect(166, y, 340, 18), nil, NULL);
+                          NSMakeRect(166, r, 340, kLabelH), nil, NULL);
     [v addSubview:webPlugin];
-    y -= 18;
+
+    r = NextRow(&y, kLineH, 1);
     [v addSubview:MakeNote(@"Billed per search by OpenRouter. Needs no extra key.",
-                           NSMakeRect(184, y - 4, 320, 16))];
+                           NSMakeRect(184, r, 320, kLineH))];
 
     return v;
 }
@@ -243,13 +331,16 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 - (NSView *)buildMcpTab {
     NSView *v = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 300)] autorelease];
 
+    CGFloat y = kPaneTop;
+    CGFloat r = NextRow(&y, 92, 0);
+
     NSScrollView *scroll = [[[NSScrollView alloc]
-        initWithFrame:NSMakeRect(20, 168, 470, 108)] autorelease];
+        initWithFrame:NSMakeRect(20, r, 470, 92)] autorelease];
     [scroll setHasVerticalScroller:YES];
     [scroll setBorderType:NSBezelBorder];
 
     mcpTable = [[[NSTableView alloc]
-        initWithFrame:NSMakeRect(0, 0, 450, 108)] autorelease];
+        initWithFrame:NSMakeRect(0, 0, 450, 92)] autorelease];
     NSTableColumn *c1 = [[[NSTableColumn alloc] initWithIdentifier:@"name"] autorelease];
     [[c1 headerCell] setStringValue:@"Server"];
     [c1 setWidth:120];
@@ -264,63 +355,76 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
     [scroll setDocumentView:mcpTable];
     [v addSubview:scroll];
 
-    CGFloat y = 138;
-    [v addSubview:MakeLabel(@"Name:", NSMakeRect(20, y, 90, 18), NO)];
-    mcpName = [[[NSTextField alloc] initWithFrame:NSMakeRect(116, y - 2, 130, 22)]
+    r = NextRow(&y, kPopupH, 10);
+    [v addSubview:MakeLabel(@"Name:",
+                            NSMakeRect(20, Centred(r, kPopupH, kLabelH), 90, kLabelH),
+                            NO)];
+    mcpName = [[[NSTextField alloc]
+        initWithFrame:NSMakeRect(116, Centred(r, kPopupH, kFieldH), 130, kFieldH)]
                   autorelease];
     [v addSubview:mcpName];
 
-    [v addSubview:MakeLabel(@"Transport:", NSMakeRect(252, y, 70, 18), NO)];
+    [v addSubview:MakeLabel(@"Transport:",
+                            NSMakeRect(252, Centred(r, kPopupH, kLabelH), 70, kLabelH),
+                            NO)];
     mcpTransport = [[[NSPopUpButton alloc]
-        initWithFrame:NSMakeRect(328, y - 4, 100, 24)] autorelease];
+        initWithFrame:NSMakeRect(328, r, 100, kPopupH)] autorelease];
     [mcpTransport addItemWithTitle:@"http"];
     [mcpTransport addItemWithTitle:@"stdio"];
     [mcpTransport setTarget:self];
     [mcpTransport setAction:@selector(transportChanged:)];
     [v addSubview:mcpTransport];
 
-    y -= 28;
-    [v addSubview:MakeLabel(@"URL:", NSMakeRect(20, y, 90, 18), NO)];
+    r = NextRow(&y, kFieldH, 8);
+    [v addSubview:MakeLabel(@"URL:",
+                            NSMakeRect(20, Centred(r, kFieldH, kLabelH), 90, kLabelH),
+                            NO)];
     mcpCommandOrUrl = [[[NSTextField alloc]
-        initWithFrame:NSMakeRect(116, y - 2, 374, 22)] autorelease];
+        initWithFrame:NSMakeRect(116, r, 374, kFieldH)] autorelease];
     [v addSubview:mcpCommandOrUrl];
 
-    y -= 28;
-    [v addSubview:MakeLabel(@"Arguments:", NSMakeRect(20, y, 90, 18), NO)];
-    mcpArgs = [[[NSTextField alloc] initWithFrame:NSMakeRect(116, y - 2, 374, 22)]
-                  autorelease];
+    r = NextRow(&y, kFieldH, 8);
+    [v addSubview:MakeLabel(@"Arguments:",
+                            NSMakeRect(20, Centred(r, kFieldH, kLabelH), 90, kLabelH),
+                            NO)];
+    mcpArgs = [[[NSTextField alloc]
+        initWithFrame:NSMakeRect(116, r, 374, kFieldH)] autorelease];
     [v addSubview:mcpArgs];
 
-    y -= 28;
-    [v addSubview:MakeLabel(@"Header:", NSMakeRect(20, y, 90, 18), NO)];
+    r = NextRow(&y, kFieldH, 8);
+    [v addSubview:MakeLabel(@"Header:",
+                            NSMakeRect(20, Centred(r, kFieldH, kLabelH), 90, kLabelH),
+                            NO)];
     mcpHeaderName = [[[NSTextField alloc]
-        initWithFrame:NSMakeRect(116, y - 2, 130, 22)] autorelease];
+        initWithFrame:NSMakeRect(116, r, 130, kFieldH)] autorelease];
     [mcpHeaderName setStringValue:@"Authorization"];
     [v addSubview:mcpHeaderName];
     mcpHeaderValue = [[[NSSecureTextField alloc]
-        initWithFrame:NSMakeRect(252, y - 2, 238, 22)] autorelease];
+        initWithFrame:NSMakeRect(252, r, 238, kFieldH)] autorelease];
     [[mcpHeaderValue cell] setPlaceholderString:@"Bearer ..."];
     [v addSubview:mcpHeaderValue];
 
-    y -= 24;
+    r = NextRow(&y, 2 * kLineH, 2);
     [v addSubview:MakeNote(@"For a token-protected server, leave the header name "
                             "as Authorization and paste \"Bearer <token>\".",
-                           NSMakeRect(116, y - 6, 380, 16))];
+                           NSMakeRect(116, r, 380, 2 * kLineH))];
 
-    y -= 30;
-    mcpEnabled = MakeCheck(@"Enabled", NSMakeRect(116, y, 90, 18), nil, NULL);
+    r = NextRow(&y, 26, 8);
+    mcpEnabled = MakeCheck(@"Enabled",
+                           NSMakeRect(116, Centred(r, 26, kLabelH), 90, kLabelH),
+                           nil, NULL);
     [mcpEnabled setState:NSOnState];
     [v addSubview:mcpEnabled];
 
-    [v addSubview:MakePush(@"Add / Update", NSMakeRect(232, y - 4, 110, 26), self,
+    [v addSubview:MakePush(@"Add / Update", NSMakeRect(232, r, 110, 26), self,
                            @selector(addMcp:))];
-    [v addSubview:MakePush(@"Remove", NSMakeRect(348, y - 4, 80, 26), self,
+    [v addSubview:MakePush(@"Remove", NSMakeRect(348, r, 80, 26), self,
                            @selector(removeMcp:))];
-    [v addSubview:MakePush(@"Test", NSMakeRect(434, y - 4, 56, 26), self,
+    [v addSubview:MakePush(@"Test", NSMakeRect(434, r, 56, 26), self,
                            @selector(testMcp:))];
 
-    y -= 26;
-    mcpStatus = MakeNote(@"", NSMakeRect(20, y - 4, 470, 16));
+    r = NextRow(&y, kLineH, 6);
+    mcpStatus = MakeNote(@"", NSMakeRect(20, r, 470, kLineH));
     [v addSubview:mcpStatus];
 
     return v;
@@ -328,33 +432,39 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 
 - (NSView *)buildToolsTab {
     NSView *v = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 300)] autorelease];
-    CGFloat y = 250;
+    CGFloat y = kPaneTop;
+    CGFloat r;
 
-    [v addSubview:MakeLabel(@"Command line tool", NSMakeRect(20, y, 140, 18), YES)];
-    y -= 22;
-    cliStatus = MakeNote(@"", NSMakeRect(20, y, 470, 32));
+    r = NextRow(&y, kLabelH, 0);
+    [v addSubview:MakeSection(@"Command line tool", NSMakeRect(20, r, 200, kLabelH))];
+
+    r = NextRow(&y, 2 * kLineH, 4);
+    cliStatus = MakeNote(@"", NSMakeRect(20, r, 470, 2 * kLineH));
     [v addSubview:cliStatus];
 
-    y -= 36;
-    [v addSubview:MakeLabel(@"Install to:", NSMakeRect(20, y, 90, 18), NO)];
+    r = NextRow(&y, 26, 12);
+    [v addSubview:MakeLabel(@"Install to:",
+                            NSMakeRect(20, Centred(r, 26, kLabelH), 90, kLabelH), NO)];
     cliLocation = [[[NSPopUpButton alloc]
-        initWithFrame:NSMakeRect(116, y - 4, 220, 24)] autorelease];
+        initWithFrame:NSMakeRect(116, Centred(r, 26, kPopupH), 220, kPopupH)]
+                      autorelease];
     [cliLocation addItemWithTitle:
         [NSHomeDirectory() stringByAppendingPathComponent:@"bin"]];
     [cliLocation addItemWithTitle:@"/usr/local/bin"];
     [v addSubview:cliLocation];
-    [v addSubview:MakePush(@"Install", NSMakeRect(346, y - 4, 90, 26), self,
+    [v addSubview:MakePush(@"Install", NSMakeRect(346, r, 90, 26), self,
                            @selector(installCLI:))];
 
-    y -= 30;
+    r = NextRow(&y, kLineH, 6);
     [v addSubview:MakeNote(@"Adds the ppcode command to that directory. Make sure "
                             "it is on your PATH.",
-                           NSMakeRect(116, y - 4, 380, 16))];
+                           NSMakeRect(116, r, 380, kLineH))];
 
-    y -= 44;
-    [v addSubview:MakeLabel(@"MacPorts", NSMakeRect(20, y, 140, 18), YES)];
-    y -= 22;
-    portStatus = MakeNote(@"", NSMakeRect(20, y - 10, 470, 44));
+    r = NextRow(&y, kLabelH, 20);
+    [v addSubview:MakeSection(@"MacPorts", NSMakeRect(20, r, 200, kLabelH))];
+
+    r = NextRow(&y, 3 * kLineH, 4);
+    portStatus = MakeNote(@"", NSMakeRect(20, r, 470, 3 * kLineH));
     [v addSubview:portStatus];
 
     return v;
@@ -362,7 +472,20 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 
 // ---------------------------------------------------------------------------
 
+- (NSWindow *)panelWindow {
+    [self buildPanel];
+    [self load:nil];
+
+    return panel;
+}
+
 - (void)showWindow {
+    [self buildPanel];
+    [self load:nil];
+    [panel makeKeyAndOrderFront:nil];
+}
+
+- (void)buildPanel {
     if (!panel) {
         NSRect frame = NSMakeRect(0, 0, 560, 400);
         panel = [[NSWindow alloc]
@@ -399,8 +522,6 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 
         [panel center];
     }
-    [self load:nil];
-    [panel makeKeyAndOrderFront:nil];
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +546,8 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
     [openrouterKey setStringValue:Or([cfg objectForKey:@"api_key"], @"")];
     [keyStatus setStringValue:[bridge hasApiKey]
         ? @"A key is configured."
-        : @"No key yet — ppcode cannot talk to any model until one is set."];
+        : PPUTF8("No key yet \xE2\x80\x94 ppcode cannot talk to any model "
+                 "until one is set.")];
     [[keyStatus cell] setTextColor:[bridge hasApiKey] ? [NSColor darkGrayColor]
                                                       : [NSColor redColor]];
 
@@ -513,8 +635,9 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
     } else {
         BOOL qjs = [bridge isPortInstalled:@"quickjs"];
         [portStatus setStringValue:[NSString stringWithFormat:
-            @"MacPorts at %@.\nQuickJS: %@ — only needed to run JavaScript MCP "
-             "servers locally. HTTP and other stdio servers do not require it.",
+            PPUTF8("MacPorts at %@.\nQuickJS: %@ \xE2\x80\x94 only needed to run "
+                   "JavaScript MCP servers locally. HTTP and other stdio servers "
+                   "do not require it."),
             prefix, qjs ? @"installed" : @"not installed"]];
     }
 }
@@ -597,7 +720,9 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
                          ? Or([s objectForKey:@"url"], @"")
                          : Or([s objectForKey:@"command"], @"");
     NSDictionary *h = [s objectForKey:@"headers"];
-    NSString *auth = [h count] ? @"  🔒" : @"";
+    // No emoji: this platform predates an emoji font, so a lock character would
+    // render as a hollow box even once the literal itself is built correctly.
+    NSString *auth = [h count] ? @"  [auth]" : @"";
     return [NSString stringWithFormat:@"%@  %@%@", transport, addr, auth];
 }
 
