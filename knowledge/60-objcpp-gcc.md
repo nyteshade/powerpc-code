@@ -51,6 +51,29 @@ Two ways round it:
 - Put anything that genuinely must catch into a plain `.cpp` compiled as C++,
   and call it from the `.mm`.
 
+### A lambda capture list is parsed as a message send
+
+A C++ lambda with a **non-empty** capture list is ambiguous with Objective-C
+message syntax, and GCC's Objective-C++ front end resolves it the wrong way:
+
+```objc
+auto f = [nx, ny](int a, int b) { ... };   // parsed as a message send
+```
+
+There is no error. The only sign is
+
+```
+warning: left operand of comma operator has no effect [-Wunused-value]
+```
+
+and then a cascade of unrelated complaints. An empty `[]` capture is
+unambiguous and compiles, which is why lambdas appear to work until the first
+time one needs to capture something.
+
+Use a free function taking the values as parameters. This is a parsing
+ambiguity, not a missing feature, so it applies only in `.mm` files — the same
+lambda in a `.cpp` is fine.
+
 ### Instance variables must be declared in the `@interface`
 
 GCC targets the **fragile** Objective-C ABI on this platform, so declaring ivars

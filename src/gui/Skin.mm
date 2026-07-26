@@ -20,27 +20,53 @@ struct Rng {
 
 // Value noise with smooth interpolation: cheap, and gives the soft mottling
 // that reads as hide rather than as television static.
-double smooth_noise(double x, double y, int period, Rng& seedsrc) {
-    (void)seedsrc;
-    // Hash lattice points deterministically from their coordinates.
-    auto lattice = [](int ix, int iy) {
-        unsigned h = static_cast<unsigned>(ix) * 374761393u +
-                     static_cast<unsigned>(iy) * 668265263u;
-        h = (h ^ (h >> 13)) * 1274126177u;
-        return static_cast<double>((h ^ (h >> 16)) & 0xFFFF) / 65535.0;
-    };
-    double fx = x / period, fy = y / period;
+//
+// The lattice wraps at the tile edge. Without that the value at x = 0 and the
+// value at x = kTileSize are unrelated, every repeat of the tile shows a hard
+// edge, and a surface meant to read as one piece of leather instead reads as a
+// grid of tiles -- which is exactly how it looked before. periodX and periodY
+// must divide kTileSize, or the wrap lands mid-cell and the seam comes back.
+const int kTileSize = 128;
+
+// A free function rather than a lambda on purpose. A capture list is written
+// with the same brackets as a message send, and GCC's Objective-C++ front end
+// resolves the ambiguity the wrong way: `[nx, ny](int, int)` is parsed as an
+// expression with a comma operator, and the only sign of it is
+// "left operand of comma operator has no effect". An empty `[]` capture happens
+// to be unambiguous, which is why the original compiled.
+double lattice_at(int ix, int iy, int nx, int ny) {
+    ix = ((ix % nx) + nx) % nx;
+    iy = ((iy % ny) + ny) % ny;
+    unsigned h = static_cast<unsigned>(ix) * 374761393u +
+                 static_cast<unsigned>(iy) * 668265263u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+
+    return static_cast<double>((h ^ (h >> 16)) & 0xFFFF) / 65535.0;
+}
+
+double smooth_noise(double x, double y, int periodX, int periodY) {
+    int nx = kTileSize / (periodX > 0 ? periodX : 1);
+    int ny = kTileSize / (periodY > 0 ? periodY : 1);
+    if (nx < 1) nx = 1;
+    if (ny < 1) ny = 1;
+
+    double fx = x / periodX, fy = y / periodY;
     int x0 = static_cast<int>(std::floor(fx)), y0 = static_cast<int>(std::floor(fy));
     double tx = fx - x0, ty = fy - y0;
     // Smoothstep, so the lattice does not show as a grid.
     tx = tx * tx * (3 - 2 * tx);
     ty = ty * ty * (3 - 2 * ty);
 
-    double a = lattice(x0, y0), b = lattice(x0 + 1, y0);
-    double c = lattice(x0, y0 + 1), d = lattice(x0 + 1, y0 + 1);
+    double a = lattice_at(x0, y0, nx, ny), b = lattice_at(x0 + 1, y0, nx, ny);
+    double c = lattice_at(x0, y0 + 1, nx, ny), d = lattice_at(x0 + 1, y0 + 1, nx, ny);
     double top = a + (b - a) * tx;
     double bottom = c + (d - c) * tx;
     return top + (bottom - top) * ty;
+}
+
+// Isotropic convenience.
+double smooth_noise(double x, double y, int period) {
+    return smooth_noise(x, y, period, period);
 }
 
 // GCC has no blocks, so the pixel filler is an ordinary function pointer.
@@ -66,12 +92,13 @@ NSImage* make_tile(int size, FillFn fill) {
 }
 
 void fill_leather(unsigned char* px, int w, int h) {
-        Rng rng(0xC0FFEE);
+        // No Rng here: the noise is hashed from the coordinates themselves, so
+        // the tile is both reproducible across launches and able to wrap.
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
                 // Two octaves: broad hide mottling, then fine pebble grain.
-                double broad = smooth_noise(x, y, 32, rng);
-                double fine  = smooth_noise(x * 2, y * 2, 7, rng);
+                double broad = smooth_noise(x, y, 32);
+                double fine  = smooth_noise(x, y, 4);
                 double grain = 0.70 * broad + 0.30 * fine;
 
                 // Oxblood: a warm dark red-brown.
@@ -79,7 +106,7 @@ void fill_leather(unsigned char* px, int w, int h) {
                 double lift = (grain - 0.5) * 34.0;
 
                 // Occasional darker creases, as if the hide were folded.
-                double crease = smooth_noise(x, y * 3, 21, rng);
+                double crease = smooth_noise(x, y, 16, 8);
                 if (crease < 0.22) lift -= (0.22 - crease) * 90.0;
 
                 int r = static_cast<int>(base_r + lift * 1.10);
@@ -94,13 +121,12 @@ void fill_leather(unsigned char* px, int w, int h) {
 }
 
 void fill_paper(unsigned char* px, int w, int h) {
-        Rng rng(0x0FF1CE);
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
                 // Aged cream with a very fine fibre speckle. Kept subtle: paper
                 // that is obviously noisy looks dirty rather than old.
-                double fibre = smooth_noise(x * 3, y * 3, 5, rng);
-                double stain = smooth_noise(x, y, 64, rng);
+                double fibre = smooth_noise(x, y, 2);
+                double stain = smooth_noise(x, y, 64);
                 double lift = (fibre - 0.5) * 7.0 + (stain - 0.5) * 9.0;
 
                 int r = static_cast<int>(243 + lift);
@@ -122,13 +148,13 @@ void fill_paper(unsigned char* px, int w, int h) {
 // generate in a few milliseconds even on this hardware.
 + (NSImage *)leatherTile {
     static NSImage* tile = nil;
-    if (!tile) tile = [make_tile(128, fill_leather) retain];
+    if (!tile) tile = [make_tile(kTileSize, fill_leather) retain];
     return tile;
 }
 
 + (NSImage *)paperTile {
     static NSImage* tile = nil;
-    if (!tile) tile = [make_tile(128, fill_paper) retain];
+    if (!tile) tile = [make_tile(kTileSize, fill_paper) retain];
     return tile;
 }
 

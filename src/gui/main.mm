@@ -102,6 +102,82 @@
 @end
 
 // ---------------------------------------------------------------------------
+// Skin containers
+//
+// Skin.mm draws the materials; these two put them where the interface needs
+// them. Both are here rather than in Skin.mm because they are about this
+// window's arrangement, not about the surfaces themselves.
+// ---------------------------------------------------------------------------
+
+// Holds a scroll view pressed into the leather. The content is inset so the
+// well's shadow is visible around it.
+@interface PPWellView : NSView
+@end
+
+@implementation PPWellView
+
+- (void)drawRect:(NSRect)dirty {
+  (void)dirty;
+  [PPSkin drawRecessedWellInRect:[self bounds] radius:5.0];
+}
+
+@end
+
+// Put `scroll` in a well, over a sheet of paper.
+//
+// The paper is a view behind the scroll view rather than the text view's own
+// background colour. A pattern NSColor on a scrolling NSTextView is drawn with
+// whatever pattern phase each partial redraw happens to have, so the tile seams
+// show up as a grid of rectangles across the page. A view draws the tile
+// against its own bounds every time, so it is seamless -- and the paper then
+// stays put while the text moves over it, which is the right way round.
+static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
+                                   unsigned autoresize, BOOL ruled) {
+  PPWellView *well = [[[PPWellView alloc] initWithFrame:frame] autorelease];
+  [well setAutoresizingMask:autoresize];
+
+  NSRect inner = NSInsetRect([well bounds], 5, 5);
+
+  PPPaperView *paper = [[[PPPaperView alloc] initWithFrame:inner] autorelease];
+  [paper setRuled:ruled];
+  [paper setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+  [well addSubview:paper];
+
+  [scroll setFrame:inner];
+  [scroll setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+  [scroll setDrawsBackground:NO];
+  [well addSubview:scroll];
+
+  return well;
+}
+
+// The header band: leather with the name blocked into it, the way a title is
+// stamped on a cover.
+@interface PPTitleView : PPLeatherView
+@end
+
+@implementation PPTitleView
+
+- (void)drawRect:(NSRect)dirty {
+  [super drawRect:dirty];
+
+  NSRect b = [self bounds];
+  NSFont *font = [NSFont fontWithName:@"Baskerville" size:15.0];
+  if (!font) { font = [NSFont boldSystemFontOfSize:14.0]; }
+
+  NSRect text = NSMakeRect(0, (NSHeight(b) - 18.0) / 2.0, NSWidth(b), 18.0);
+  [PPSkin drawEmbossedText:@"ppcode"
+                    inRect:text
+                      font:font
+                     color:[NSColor colorWithCalibratedRed:0.83
+                                                     green:0.71
+                                                      blue:0.44
+                                                     alpha:1.0]];
+}
+
+@end
+
+// ---------------------------------------------------------------------------
 // Controller
 // ---------------------------------------------------------------------------
 
@@ -300,17 +376,38 @@
     [window setFrameAutosaveName:@"PPCodeMainWindow"];   // position persists free
     [window setMinSize:NSMakeSize(640, 400)];
 
-    NSView *content = [window contentView];
+    // The whole window is a leather surface; the content areas are paper laid
+    // on top of it. Keeping the text on paper rather than tinting it onto the
+    // hide is what keeps it legible -- dark type on dark leather is the usual
+    // way this style goes wrong.
+    PPLeatherView *content =
+        [[[PPLeatherView alloc] initWithFrame:frame] autorelease];
+    [content setStitched:YES];
+    [window setContentView:content];
+
+    // --- header band ---------------------------------------------------------
+    PPTitleView *header =
+        [[[PPTitleView alloc] initWithFrame:NSMakeRect(0, 610, 940, 30)] autorelease];
+    [header setStitched:NO];
+    [header setDark:YES];
+    [header setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+    [content addSubview:header];
 
     // --- left: session list -------------------------------------------------
     NSScrollView *listScroll =
-        [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 220, 640)] autorelease];
+        [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 220, 580)] autorelease];
     [listScroll setHasVerticalScroller:YES];
     [listScroll setAutoresizingMask:NSViewHeightSizable];
-    [listScroll setBorderType:NSBezelBorder];
+    [listScroll setBorderType:NSNoBorder];
+    [listScroll setDrawsBackground:NO];
 
-    sessionTable = [[[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 200, 640)]
+    sessionTable = [[[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 200, 580)]
                        autorelease];
+    // Transparent so the paper behind the scroll view shows through. The
+    // alternating row tint has to go with it: it paints opaque bands that would
+    // hide the texture entirely.
+    [sessionTable setBackgroundColor:[NSColor clearColor]];
+    [sessionTable setGridStyleMask:NSTableViewGridNone];
     NSTableColumn *col =
         [[[NSTableColumn alloc] initWithIdentifier:@"title"] autorelease];
     [[col headerCell] setStringValue:@"Conversations"];
@@ -318,15 +415,20 @@
     [sessionTable addTableColumn:col];
     [sessionTable setDataSource:self];
     [sessionTable setDelegate:self];
-    [sessionTable setUsesAlternatingRowBackgroundColors:YES];
+    [sessionTable setUsesAlternatingRowBackgroundColors:NO];
     [sessionTable setRowHeight:32.0];
     [listScroll setDocumentView:sessionTable];
 
     // --- right: transcript over composer ------------------------------------
+    // The transcript is the page: aged paper, ruled, with the type sitting on
+    // it. NSTextView draws its own background, so the paper pattern goes there
+    // rather than into a view behind it -- one less layer to keep in sync when
+    // the text scrolls.
     NSScrollView *transScroll =
         [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 700, 430)] autorelease];
     [transScroll setHasVerticalScroller:YES];
-    [transScroll setBorderType:NSBezelBorder];
+    [transScroll setBorderType:NSNoBorder];
+    [transScroll setDrawsBackground:NO];
     [transScroll setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
     transcript = [[[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 700, 430)]
@@ -334,35 +436,56 @@
     [transcript setEditable:NO];
     [transcript setRichText:YES];
     [transcript setAutoresizingMask:NSViewWidthSizable];
-    [transcript setTextContainerInset:NSMakeSize(8, 8)];
+    // Clear of the paper's red margin rule, which PPPaperView draws at x = 52.
+    // Text running across the margin is the one thing ruled paper must not do.
+    [transcript setTextContainerInset:NSMakeSize(58, 12)];
+    [transcript setDrawsBackground:NO];
     [transScroll setDocumentView:transcript];
+
+    PPWellView *transWell =
+        WrapInPaperWell(transScroll, NSMakeRect(0, 0, 720, 440),
+                        NSViewWidthSizable | NSViewHeightSizable, YES);
 
     NSScrollView *compScroll =
         [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 700, 110)] autorelease];
     [compScroll setHasVerticalScroller:YES];
-    [compScroll setBorderType:NSBezelBorder];
-    [compScroll setAutoresizingMask:NSViewWidthSizable];
+    [compScroll setBorderType:NSNoBorder];
+    [compScroll setDrawsBackground:NO];
+    [compScroll setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
     composer = [[[PPComposer alloc] initWithFrame:NSMakeRect(0, 0, 700, 110)]
                    autorelease];
     [composer setFont:[NSFont systemFontOfSize:12.0]];
     [composer setDropTarget:self];
     [composer setAutoresizingMask:NSViewWidthSizable];
+    [composer setDrawsBackground:NO];
+    [composer setTextContainerInset:NSMakeSize(6, 6)];
     [compScroll setDocumentView:composer];
 
+    // The composer sits pressed into the leather, which is the affordance that
+    // says "write here". Unruled: it is a note pad, not a page.
+    PPWellView *compWell =
+        WrapInPaperWell(compScroll, NSMakeRect(0, 0, 720, 120),
+                        NSViewWidthSizable | NSViewHeightSizable, NO);
+
     NSSplitView *rightSplit =
-        [[[NSSplitView alloc] initWithFrame:NSMakeRect(220, 30, 720, 610)] autorelease];
+        [[[NSSplitView alloc] initWithFrame:NSMakeRect(220, 30, 720, 580)] autorelease];
     [rightSplit setVertical:NO];
     [rightSplit setDividerStyle:NSSplitViewDividerStyleThin];
-    [rightSplit addSubview:transScroll];
-    [rightSplit addSubview:compScroll];
+    [rightSplit addSubview:transWell];
+    [rightSplit addSubview:compWell];
     [rightSplit setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
     NSSplitView *mainSplit =
-        [[[NSSplitView alloc] initWithFrame:NSMakeRect(0, 30, 940, 610)] autorelease];
+        [[[NSSplitView alloc] initWithFrame:NSMakeRect(0, 30, 940, 580)] autorelease];
     [mainSplit setVertical:YES];
     [mainSplit setDividerStyle:NSSplitViewDividerStyleThin];
-    [mainSplit addSubview:listScroll];
+
+    PPWellView *listWell =
+        WrapInPaperWell(listScroll, NSMakeRect(0, 0, 220, 580),
+                        NSViewHeightSizable, NO);
+
+    [mainSplit addSubview:listWell];
     [mainSplit addSubview:rightSplit];
     [mainSplit setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
     [content addSubview:mainSplit];
@@ -375,6 +498,8 @@
     [statusField setEditable:NO];
     [statusField setSelectable:NO];
     [statusField setFont:[NSFont systemFontOfSize:11.0]];
+    // Light type: this row sits directly on the leather, not on paper.
+    [statusField setTextColor:[NSColor colorWithCalibratedWhite:0.86 alpha:1.0]];
     [statusField setStringValue:@"Ready"];
     [content addSubview:statusField];
 
@@ -385,7 +510,7 @@
     [attachField setEditable:NO];
     [attachField setSelectable:NO];
     [attachField setFont:[NSFont systemFontOfSize:11.0]];
-    [attachField setTextColor:[NSColor darkGrayColor]];
+    [attachField setTextColor:[NSColor colorWithCalibratedWhite:0.72 alpha:1.0]];
     [content addSubview:attachField];
 
     spinner = [[[NSProgressIndicator alloc] initWithFrame:NSMakeRect(618, 6, 16, 16)]
