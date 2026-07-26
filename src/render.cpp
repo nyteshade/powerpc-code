@@ -179,6 +179,14 @@ struct LangSpec {
     bool preproc_hash = false;      // C-style #include
     bool dollar_vars = false;       // shell $VAR / ${VAR}
     bool key_colon = false;         // YAML-ish "key:" highlighting
+
+    // Objective-C. This is the primary language on this platform, so it gets
+    // real support rather than being lumped in with C++.
+    bool at_directives = false;     // @interface, @property, @end, ...
+    bool at_strings = false;        // @"literal" -- the @ is part of the token
+    bool selectors = false;         // [obj doThing:x withOther:y] -- name: parts
+    // Identifiers with these prefixes are framework types by convention.
+    std::vector<std::string> type_prefixes;
 };
 
 const std::set<std::string> kCppKeywords = {
@@ -201,6 +209,37 @@ const std::set<std::string> kCppTypes = {
 };
 const std::set<std::string> kCppConstants = {
     "true","false","nullptr","NULL","EOF","stdin","stdout","stderr",
+};
+
+// Objective-C. The @-directives are handled separately (they are matched with
+// their leading @), these are the bare-word keywords.
+const std::set<std::string> kObjCKeywords = {
+    "self", "super", "_cmd", "in", "out", "inout", "bycopy", "byref", "oneway",
+    "getter", "setter", "readonly", "readwrite", "assign", "retain", "copy",
+    "nonatomic", "atomic", "strong", "weak", "unsafe_unretained", "nullable",
+    "nonnull", "IBAction", "IBOutlet",
+};
+
+// Types that matter on Leopard-era Cocoa. Anything with an NS/CG/CF prefix is
+// caught by the prefix rule instead of being listed here.
+const std::set<std::string> kObjCTypes = {
+    "id", "Class", "SEL", "IMP", "BOOL", "Protocol", "instancetype",
+    "NSInteger", "NSUInteger", "CGFloat", "NSTimeInterval", "NSComparisonResult",
+    "unichar", "NSPoint", "NSRect", "NSSize", "NSRange", "OSStatus", "OSErr",
+    "FourCharCode", "Boolean", "UInt8", "UInt16", "UInt32", "SInt32", "Float32",
+};
+
+const std::set<std::string> kObjCConstants = {
+    "nil", "Nil", "YES", "NO", "NULL", "TRUE", "FALSE",
+};
+
+// Directives, matched including the '@'.
+const std::set<std::string> kObjCAtDirectives = {
+    "@interface", "@implementation", "@protocol", "@end", "@class",
+    "@property", "@synthesize", "@dynamic", "@selector", "@encode",
+    "@synchronized", "@try", "@catch", "@finally", "@throw", "@autoreleasepool",
+    "@optional", "@required", "@public", "@private", "@protected", "@package",
+    "@defs", "@compatibility_alias", "@import", "@available",
 };
 
 const std::set<std::string> kPyKeywords = {
@@ -244,8 +283,16 @@ std::string canonical_lang(const std::string& raw) {
     size_t cut = l.find_first_of(" ,;");
     if (cut != std::string::npos) l = l.substr(0, cut);
 
-    if (l == "c" || l == "h" || l == "cc" || l == "cpp" || l == "c++" ||
-        l == "hpp" || l == "cxx" || l == "objc" || l == "objective-c" || l == "m")
+    // Objective-C is the primary language on this platform and gets its own
+    // tokenizer. A bare .h on a Mac is far more often Objective-C than C++, so
+    // it maps here; use ```cpp explicitly for a C++ header.
+    if (l == "objc" || l == "objective-c" || l == "objectivec" || l == "m" ||
+        l == "h" || l == "obj-c")
+        return "objc";
+    if (l == "objcpp" || l == "objective-c++" || l == "mm" || l == "obj-c++")
+        return "objcpp";
+    if (l == "c" || l == "cc" || l == "cpp" || l == "c++" ||
+        l == "hpp" || l == "hxx" || l == "cxx")
         return "cpp";
     if (l == "py" || l == "python" || l == "python3") return "python";
     if (l == "js" || l == "javascript" || l == "mjs" || l == "ts" ||
@@ -267,6 +314,41 @@ bool build_spec(const std::string& lang, LangSpec* out) {
         s.keywords = kCppKeywords; s.types = kCppTypes; s.constants = kCppConstants;
         s.line_comment = "//"; s.block_open = "/*"; s.block_close = "*/";
         s.preproc_hash = true;
+    } else if (lang == "objc" || lang == "objcpp") {
+        // Objective-C is C plus the @-directives and the message syntax.
+        // Objective-C++ is all of that plus C++.
+        s.keywords = kObjCKeywords;
+        s.types = kObjCTypes;
+        s.constants = kObjCConstants;
+        // C keywords apply in both cases; C++ ones only for .mm.
+        static const std::set<std::string> kCKeywords = {
+            "auto", "break", "case", "const", "continue", "default", "do", "else",
+            "enum", "extern", "for", "goto", "if", "inline", "register", "restrict",
+            "return", "sizeof", "static", "struct", "switch", "typedef", "union",
+            "volatile", "while",
+        };
+        s.keywords.insert(kCKeywords.begin(), kCKeywords.end());
+        static const std::set<std::string> kCTypes = {
+            "char", "double", "float", "int", "long", "short", "signed",
+            "unsigned", "void", "size_t", "ssize_t", "uint8_t", "uint16_t",
+            "uint32_t", "uint64_t", "int8_t", "int16_t", "int32_t", "int64_t",
+            "FILE", "va_list",
+        };
+        s.types.insert(kCTypes.begin(), kCTypes.end());
+        if (lang == "objcpp") {
+            s.keywords.insert(kCppKeywords.begin(), kCppKeywords.end());
+            s.types.insert(kCppTypes.begin(), kCppTypes.end());
+            s.constants.insert(kCppConstants.begin(), kCppConstants.end());
+        }
+        s.line_comment = "//"; s.block_open = "/*"; s.block_close = "*/";
+        s.preproc_hash = true;
+        s.at_directives = true;
+        s.at_strings = true;
+        s.selectors = true;
+        // Cocoa and Core Foundation naming conventions, so framework types are
+        // coloured without enumerating thousands of class names.
+        s.type_prefixes = {"NS", "CG", "CF", "CA", "CI", "CV", "CL", "AB", "IB",
+                           "QT", "AX", "SC", "DR", "IO", "WebK", "Web"};
     } else if (lang == "python") {
         s.keywords = kPyKeywords; s.types = kPyTypes; s.constants = kPyConstants;
         s.line_comment = "#"; s.triple_quotes = true;
@@ -311,11 +393,26 @@ void push_span(Line* line, const std::string& text, Style st) {
 
 // Highlight one logical source line. `in_block_comment` and `in_triple` carry
 // state across lines within the same code block.
+bool has_type_prefix(const std::string& word, const LangSpec& spec) {
+    if (spec.type_prefixes.empty()) return false;
+    // The convention is a prefix followed by an upper-case letter: NSString
+    // yes, NSomething no, nsfoo no.
+    for (const std::string& p : spec.type_prefixes) {
+        if (word.size() <= p.size()) continue;
+        if (word.compare(0, p.size(), p) != 0) continue;
+        if (std::isupper(static_cast<unsigned char>(word[p.size()]))) return true;
+    }
+    return false;
+}
+
 Line highlight_line(const std::string& src, const LangSpec& spec,
                     bool* in_block_comment, std::string* in_triple) {
     Line out;
     size_t i = 0;
     const size_t n = src.size();
+    // Depth of [ ] nesting, so "name:" can be recognised as a selector part
+    // only inside a message send.
+    int bracket_depth = 0;
 
     // Continuation of a block comment from a previous line.
     if (*in_block_comment) {
@@ -395,6 +492,34 @@ Line highlight_line(const std::string& src, const LangSpec& spec,
             continue;
         }
 
+        // Objective-C @-forms. @"..." is a string literal including the @;
+        // @interface and friends are directives.
+        if (spec.at_directives && c == '@') {
+            if (spec.at_strings && i + 1 < n && src[i + 1] == '"') {
+                size_t j = i + 2;
+                while (j < n) {
+                    if (src[j] == '\\' && j + 1 < n) { j += 2; continue; }
+                    if (src[j] == '"') { j++; break; }
+                    j++;
+                }
+                push_span(&out, src.substr(i, j - i), Style::String);
+                i = j;
+                continue;
+            }
+            size_t j = i + 1;
+            while (j < n && ident_char(src[j])) j++;
+            std::string word = src.substr(i, j - i);
+            if (kObjCAtDirectives.count(word)) {
+                push_span(&out, word, Style::Keyword);
+                i = j;
+                continue;
+            }
+            // @(expr), @[..], @{..} boxing -- colour the marker at least.
+            push_span(&out, src.substr(i, 1), Style::Keyword);
+            i++;
+            continue;
+        }
+
         // Ordinary strings
         bool is_str_delim = (c == '"' && spec.dq_strings) ||
                             (c == '\'' && spec.sq_strings) ||
@@ -447,11 +572,18 @@ Line highlight_line(const std::string& src, const LangSpec& spec,
             if (spec.keywords.count(word))       st = Style::Keyword;
             else if (spec.types.count(word))     st = Style::Type;
             else if (spec.constants.count(word)) st = Style::Constant;
+            else if (has_type_prefix(word, spec)) st = Style::Type;
             else {
                 // A name immediately followed by '(' reads as a call.
                 size_t k = j;
                 while (k < n && src[k] == ' ') k++;
                 if (k < n && src[k] == '(') st = Style::Function;
+                // A selector part inside a message send: [obj doThing:x].
+                // Restricted to bracket context so ternaries and labels in
+                // ordinary C code are not mis-coloured.
+                else if (spec.selectors && bracket_depth > 0 && k < n &&
+                         src[k] == ':' && (k + 1 >= n || src[k + 1] != ':'))
+                    st = Style::Function;
                 // "key:" in JSON/YAML.
                 else if (spec.key_colon && k < n && src[k] == ':') st = Style::Type;
             }
@@ -462,6 +594,8 @@ Line highlight_line(const std::string& src, const LangSpec& spec,
 
         // Operators and punctuation
         if (std::ispunct(static_cast<unsigned char>(c))) {
+            if (c == '[') bracket_depth++;
+            else if (c == ']' && bracket_depth > 0) bracket_depth--;
             push_span(&out, std::string(1, c), Style::Operator);
             i++;
             continue;

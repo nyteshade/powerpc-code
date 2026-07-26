@@ -59,6 +59,8 @@ struct Spec {
 
     std::optional<bool> web_search;
     std::optional<int> web_max_results;
+    std::optional<double> max_cost;
+    std::string cache_mode;
 
     // Execution
     std::string cwd;

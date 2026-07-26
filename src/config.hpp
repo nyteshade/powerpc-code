@@ -45,6 +45,23 @@ struct Config {
     bool web_search = false;
     int web_max_results = 5;
 
+    // Prompt caching. The system message here is thousands of tokens of machine
+    // and platform context that is identical on every round of a turn, so
+    // caching it is the single biggest cost lever available.
+    //   "auto" -- enable for providers that need an explicit breakpoint
+    //   "on"   -- always send cache_control
+    //   "off"  -- never
+    std::string cache_mode = "auto";
+
+    // Transient failures are common enough on a long agentic run that giving up
+    // on the first 429 makes unattended jobs unreliable.
+    int max_retries = 4;
+
+    // Stop the run once this much has been spent, in USD. Zero disables it.
+    double max_cost = 0.0;
+    // Warn once cumulative spend passes this fraction of max_cost.
+    double cost_warn_fraction = 0.75;
+
     // OpenRouter attribution headers (optional but encouraged by their docs).
     std::string referer = "https://github.com/nyteshade/ppcode";
     std::string title = "ppcode";

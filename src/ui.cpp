@@ -1338,10 +1338,15 @@ int Tui::run() {
             } else if (ch == 10 && !busy_.load()) {
                 // Ctrl+J inserts a newline; Return arrives as 13 thanks to nonl().
                 ed_.insert("\n");
-                needs_redraw_ = true;
             } else {
                 handle_key(ch);
             }
+            // Any consumed key can change what is on screen. Requesting the
+            // redraw here rather than in each handler is what keeps editing
+            // visible: handle_key has many early returns, and every one of them
+            // that forgot this left the edit invisible until some other event
+            // happened to trigger a repaint.
+            needs_redraw_ = true;
             if (quit_.load()) break;
             ch = getch();
         }

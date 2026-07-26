@@ -89,6 +89,12 @@ Config Config::load(const std::string& explicit_path, std::vector<std::string>* 
             cfg.auto_approve_reads =
                 jbool(j, "auto_approve_reads", cfg.auto_approve_reads);
             cfg.yolo          = jbool(j, "yolo", cfg.yolo);
+            cfg.cache_mode    = jstr(j, "cache_mode", cfg.cache_mode);
+            cfg.max_retries   = static_cast<int>(jint(j, "max_retries", cfg.max_retries));
+            cfg.max_cost      = jnum(j, "max_cost", cfg.max_cost);
+            cfg.web_search    = jbool(j, "web_search", cfg.web_search);
+            cfg.web_max_results =
+                static_cast<int>(jint(j, "web_max_results", cfg.web_max_results));
 
             // An API key in the config file is supported but discouraged.
             if (const json* k = jptr(j, "api_key"); k && k->is_string())

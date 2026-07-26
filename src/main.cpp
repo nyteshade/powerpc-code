@@ -9,6 +9,7 @@
 #include "jobs.hpp"
 #include "mcp.hpp"
 #include "openrouter.hpp"
+#include "subagent.hpp"
 #include "sysprompt.hpp"
 #include "webtools.hpp"
 #include "xcodeproj.hpp"
@@ -19,11 +20,19 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <unistd.h>
 
 using namespace ppcode;
 
 namespace {
+
+// Shared across subagents: usage rolls up so the parent's spend cap counts
+// their tokens, and approvals are serialised so a fan-out cannot interleave
+// two prompts on the same terminal.
+std::mutex g_subagent_usage_mutex;
+Usage g_subagent_usage;
+std::mutex g_subagent_approve_mutex;
 
 const char* kUsage =
     "ppcode -- a terminal coding assistant for OpenRouter, native on PowerPC Leopard.\n"
@@ -47,6 +56,8 @@ const char* kUsage =
     "      --allow-tool NAME    permit one tool in headless mode (repeatable)\n"
     "      --deny-tool NAME     forbid one tool (repeatable, wins over --yolo)\n"
     "      --max-turns N        cap tool rounds per prompt (default 40)\n"
+    "      --max-cost USD       stop once this much has been spent this session\n"
+    "      --no-cache           disable prompt caching (on by default where supported)\n"
     "  -q, --quiet              suppress progress output on stderr\n"
     "      --resume PATH        load a saved session first\n"
     "      --save PATH          write the session out when done\n"
@@ -124,6 +135,8 @@ int main(int argc, char** argv) {
     bool dry_run = false;
     std::vector<std::string> attach_paths;
     int max_turns = -1;
+    double max_cost = -1.0;
+    bool cache_off = false;
     std::string prompt, resume_path, save_path;
     std::vector<std::string> allow_tools, deny_tools;
 
@@ -170,6 +183,12 @@ int main(int argc, char** argv) {
             if (!need("--max-turns", &v)) return 2;
             max_turns = std::atoi(v.c_str());
         }
+        else if (a == "--max-cost") {
+            std::string v;
+            if (!need("--max-cost", &v)) return 2;
+            max_cost = std::atof(v.c_str());
+        }
+        else if (a == "--no-cache")                cache_off = true;
         else if (a == "--allow-tool") {
             std::string v;
             if (!need("--allow-tool", &v)) return 2;
@@ -246,6 +265,8 @@ int main(int argc, char** argv) {
 
     if (!model.empty())   cfg.model = model;
     if (max_turns > 0)    cfg.max_turns = max_turns;
+    if (max_cost >= 0)    cfg.max_cost = max_cost;
+    if (cache_off)        cfg.cache_mode = "off";
     if (yolo)             cfg.yolo = true;
 
     if (want_write_config) {
@@ -336,6 +357,30 @@ int main(int argc, char** argv) {
 
         sysprompt::Result sp = sysprompt::build(si);
         agent.set_system_prompt(sp.text);
+
+        // Subagents inherit the platform context the parent just assembled, so
+        // they know what machine they are on without rebuilding it. Registered
+        // last so their tool roster can include everything above.
+        {
+            std::vector<std::string> awarn;
+            std::vector<subagent::Definition> defs = subagent::load_definitions(&awarn);
+            for (const std::string& w : awarn)
+                std::fprintf(stderr, "ppcode: %s\n", w.c_str());
+
+            static subagent::Host host;
+            host.client = &client;
+            host.config = &cfg;
+            host.parent_tools = &tools;
+            host.cwd = agent.cwd();
+            host.base_system = sp.text;
+            host.usage_mutex = &g_subagent_usage_mutex;
+            host.shared_usage = &g_subagent_usage;
+            host.approve_mutex = &g_subagent_approve_mutex;
+            subagent::add_tools(tools, host, defs);
+
+            if (show_context && !defs.empty())
+                std::fprintf(stderr, "agents: %zu custom + general\n", defs.size());
+        }
 
         // --show-context is an explicit request for diagnostics, so -q does not
         // suppress it.

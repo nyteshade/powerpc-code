@@ -43,6 +43,7 @@ public:
         std::string final_text;  // last assistant text
         bool cancelled = false;
         bool hit_turn_limit = false;
+        bool hit_cost_limit = false;
     };
 
     Agent(Client& client, ToolRegistry& tools, const Config& cfg);
@@ -91,6 +92,7 @@ private:
     std::string cwd_;
     Usage session_usage_;
     std::string system_override_;
+    bool cost_warned_ = false;
 
     RunResult loop(const Events& ev, std::atomic<bool>* cancel);
     void ensure_system_prompt();

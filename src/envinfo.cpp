@@ -139,7 +139,7 @@ const AppCheck kApps[] = {
     {"PowerFox", "PowerFox",
      "PowerFox is the most capable browser available for PowerPC Leopard in 2026 "
      "(UXP/Basilisk engine, TLS 1.3, WebGL). It is not installed here. If a modern "
-     "browser is needed, the current release is 26.1.0 from "
+     "browser is needed, get the current build from "
      "https://powerfox.jazzzny.me/download.html -- note its PowerPC build is beta "
      "and has no JavaScript JIT yet, so script-heavy pages are slow."},
     {"TenFourFox", "TenFourFox", ""},

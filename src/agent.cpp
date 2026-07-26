@@ -1,6 +1,7 @@
 #include "agent.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <unistd.h>
 
 namespace ppcode {
@@ -86,6 +87,32 @@ Agent::RunResult Agent::loop(const Events& ev, std::atomic<bool>* cancel) {
 
         res.usage.add(cr.usage);
         session_usage_.add(cr.usage);
+
+        // Spend guardrail. Checked after each round rather than before, because
+        // the cost of a round is only known once it has happened -- so the cap
+        // is "stop once we have crossed it", not "never exceed it".
+        if (cfg_.max_cost > 0.0) {
+            double spent = session_usage_.cost;
+            if (spent >= cfg_.max_cost) {
+                res.hit_cost_limit = true;
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                              "stopping: spent $%.4f, which reaches the $%.4f limit "
+                              "for this session (raise it with max_cost or --max-cost)",
+                              spent, cfg_.max_cost);
+                res.error = buf;
+                if (ev.on_error) ev.on_error(res.error);
+                return res;
+            }
+            if (!cost_warned_ && spent >= cfg_.max_cost * cfg_.cost_warn_fraction) {
+                cost_warned_ = true;
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                              "spent $%.4f of the $%.4f limit", spent, cfg_.max_cost);
+                if (ev.on_status) ev.on_status(buf);
+                log_line(buf);
+            }
+        }
 
         if (cr.cancelled) {
             res.cancelled = true;

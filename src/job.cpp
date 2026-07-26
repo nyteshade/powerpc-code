@@ -232,6 +232,8 @@ bool parse_text(const std::string& text, Spec* out,
         spec.max_tokens  = opt_int(meta, "max_tokens");
         spec.max_turns   = opt_int(meta, "max_turns");
         spec.seed        = opt_int(meta, "seed");
+        spec.max_cost    = opt_num(meta, "max_cost");
+        spec.cache_mode  = to_lower(jstr(meta, "cache_mode"));
 
         // web_search: true, or web: { max_results: 3 }
         spec.web_search = opt_bool(meta, "web_search");
@@ -330,6 +332,8 @@ void apply_to_config(const Spec& spec, Config* cfg) {
 
     if (spec.web_search)      cfg->web_search = *spec.web_search;
     if (spec.web_max_results) cfg->web_max_results = *spec.web_max_results;
+    if (spec.max_cost)        cfg->max_cost = *spec.max_cost;
+    if (!spec.cache_mode.empty()) cfg->cache_mode = spec.cache_mode;
 
     if (!spec.system.empty()) cfg->system_prompt = spec.system;
 }

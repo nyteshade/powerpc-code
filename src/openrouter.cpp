@@ -7,6 +7,8 @@
 #include <ctime>
 #include <filesystem>
 
+#include <unistd.h>   // usleep, for retry backoff
+
 namespace ppcode {
 
 // ---------------------------------------------------------------------------
@@ -203,6 +205,15 @@ bool StreamAssembler::feed(const std::string& data) {
         usage_.completion_tokens = jint(*u, "completion_tokens");
         usage_.total_tokens      = jint(*u, "total_tokens");
         usage_.cost              = jnum(*u, "cost");
+        // Providers report cache hits in slightly different shapes.
+        if (const json* d = jptr(*u, "prompt_tokens_details"); d && d->is_object()) {
+            usage_.cached_tokens = jint(*d, "cached_tokens");
+            usage_.cache_write_tokens = jint(*d, "cache_creation_tokens");
+        }
+        if (usage_.cached_tokens == 0)
+            usage_.cached_tokens = jint(*u, "cached_tokens");
+        if (usage_.cache_write_tokens == 0)
+            usage_.cache_write_tokens = jint(*u, "cache_creation_input_tokens");
     }
 
     // The final usage-only chunk carries an empty choices array.
@@ -257,6 +268,46 @@ http::Headers Client::auth_headers() const {
     return h;
 }
 
+// Which providers need an explicit cache breakpoint. OpenAI caches long prompts
+// automatically and rejects nothing if we stay quiet; Anthropic and Google only
+// cache what is marked.
+static bool wants_cache_control(const std::string& model, const std::string& mode) {
+    if (mode == "off") return false;
+    if (mode == "on") return true;
+    std::string m = to_lower(model);
+    return starts_with(m, "anthropic/") || starts_with(m, "google/") ||
+           m.find("claude") != std::string::npos ||
+           m.find("gemini") != std::string::npos;
+}
+
+// Rewrite a message's content into the array form with a cache breakpoint on the
+// final block. Everything before the breakpoint is cached by the provider.
+static void mark_cached(json* msg) {
+    if (!msg->is_object()) return;
+    auto it = msg->find("content");
+    if (it == msg->end()) return;
+
+    json blocks;
+    if (it->is_string()) {
+        std::string text = it->get<std::string>();
+        if (trim(text).empty()) return;
+        blocks = json::array({json{{"type", "text"}, {"text", text}}});
+    } else if (it->is_array()) {
+        if (it->empty()) return;
+        blocks = *it;
+    } else {
+        return;
+    }
+    // Attach to the last text block; a breakpoint on an image is meaningless.
+    for (auto b = blocks.rbegin(); b != blocks.rend(); ++b) {
+        if (b->is_object() && (*b)["type"] == "text") {
+            (*b)["cache_control"] = json{{"type", "ephemeral"}};
+            break;
+        }
+    }
+    (*msg)["content"] = blocks;
+}
+
 json Client::build_request(const std::vector<Message>& messages,
                            const std::vector<ToolSpec>& tools, bool stream) const {
     json req;
@@ -264,6 +315,21 @@ json Client::build_request(const std::vector<Message>& messages,
 
     json msgs = json::array();
     for (const Message& m : messages) msgs.push_back(m.to_json());
+
+    // The system message is the same thousands of tokens on every round of a
+    // turn -- machine probe, platform knowledge, tool guidance. Caching it is
+    // the difference between paying for it once and paying for it every round.
+    if (wants_cache_control(cfg_.model, cfg_.cache_mode) && !msgs.empty()) {
+        if (msgs[0].is_object() && msgs[0]["role"] == "system") mark_cached(&msgs[0]);
+
+        // A second breakpoint just before the newest turn lets the accumulated
+        // conversation be reused as tool results pile up. Anthropic allows four;
+        // two is enough and keeps the request simple.
+        if (msgs.size() >= 3) {
+            size_t idx = msgs.size() - 2;
+            if (msgs[idx].is_object()) mark_cached(&msgs[idx]);
+        }
+    }
     req["messages"] = msgs;
 
     if (!cfg_.model_fallbacks.empty()) {
@@ -326,6 +392,46 @@ static std::string extract_error(const std::string& body, long status) {
     return fallback + ": " + json_preview(body, 300);
 }
 
+// Worth another attempt? Rate limits and gateway errors are transient; a 400 or
+// a 401 will fail identically every time and retrying just wastes the user's
+// time and money.
+static bool retryable_status(long status) {
+    return status == 408 || status == 409 || status == 429 ||
+           (status >= 500 && status < 600);
+}
+
+static bool retryable_transport(const std::string& err) {
+    if (err.empty()) return false;
+    std::string e = to_lower(err);
+    return e.find("timed out") != std::string::npos ||
+           e.find("timeout") != std::string::npos ||
+           e.find("connection") != std::string::npos ||
+           e.find("resolve") != std::string::npos ||
+           e.find("recv failure") != std::string::npos ||
+           e.find("send failure") != std::string::npos ||
+           e.find("ssl") != std::string::npos;
+}
+
+// Exponential backoff with jitter. The jitter matters because an agentic loop
+// retrying in lockstep with itself just rebuilds the burst that caused the 429.
+static int backoff_ms(int attempt) {
+    int base = 800 << (attempt < 5 ? attempt : 5);      // 0.8s, 1.6s, 3.2s, ...
+    if (base > 30000) base = 30000;
+    // Cheap deterministic jitter; no need for real randomness here.
+    static unsigned seed = 0x9E3779B9u;
+    seed = seed * 1664525u + 1013904223u;
+    int jitter = static_cast<int>(seed % 400);
+    return base + jitter;
+}
+
+static void sleep_ms(int ms, std::atomic<bool>* cancel) {
+    // Wake regularly so Ctrl+C during a backoff is still responsive.
+    for (int slept = 0; slept < ms; slept += 100) {
+        if (cancel && cancel->load()) return;
+        usleep(100 * 1000);
+    }
+}
+
 ChatResult Client::chat_stream(const std::vector<Message>& messages,
                                const std::vector<ToolSpec>& tools,
                                const StreamEvents& ev,
@@ -342,45 +448,88 @@ ChatResult Client::chat_stream(const std::vector<Message>& messages,
              " messages=" + std::to_string(messages.size()) +
              " tools=" + std::to_string(tools.size()));
 
-    StreamAssembler asm_(ev);
-    auto handler = [&](const http::SseEvent& e) -> bool {
-        return asm_.feed(e.data);
-    };
+    const int attempts = cfg_.max_retries > 0 ? cfg_.max_retries + 1 : 1;
 
-    http::Response r = http::post_sse(cfg_.base_url + "/chat/completions",
-                                      auth_headers(), body, handler, cancel);
+    for (int attempt = 0; attempt < attempts; attempt++) {
+        if (cancel && cancel->load()) {
+            out.cancelled = true;
+            out.error = "cancelled";
+            return out;
+        }
 
-    out.cancelled = r.cancelled;
-    out.message = asm_.take_message();
-    out.usage = asm_.usage();
-    out.finish_reason = asm_.finish_reason();
-    out.model = asm_.model().empty() ? cfg_.model : asm_.model();
+        // Whether anything reached the user this attempt. Once a single token
+        // has been emitted we can never retry: the caller has already shown it,
+        // and a second attempt would duplicate the text.
+        bool emitted = false;
+        StreamEvents guarded = ev;
+        guarded.on_text = [&](const std::string& d) {
+            emitted = true;
+            if (ev.on_text) ev.on_text(d);
+        };
+        guarded.on_reasoning = [&](const std::string& d) {
+            emitted = true;
+            if (ev.on_reasoning) ev.on_reasoning(d);
+        };
 
-    if (r.cancelled) {
-        out.error = "cancelled";
-        return out;
-    }
-    if (!r.error.empty()) {
-        out.error = "network: " + r.error;
-        return out;
-    }
-    if (r.status < 200 || r.status >= 300) {
-        out.error = extract_error(r.body, r.status);
-        return out;
-    }
-    if (asm_.had_error()) {
-        out.error = asm_.error();
-        return out;
-    }
+        StreamAssembler asm_(guarded);
+        auto handler = [&](const http::SseEvent& e) -> bool {
+            return asm_.feed(e.data);
+        };
 
-    // A turn with neither text nor tool calls means something went wrong
-    // upstream, even though the transport succeeded.
-    if (out.message.content.empty() && out.message.tool_calls.empty()) {
-        out.error = "empty response from model";
-        return out;
-    }
+        http::Response r = http::post_sse(cfg_.base_url + "/chat/completions",
+                                          auth_headers(), body, handler, cancel);
 
-    out.ok = true;
+        ChatResult attempt_result;
+        attempt_result.cancelled = r.cancelled;
+        attempt_result.message = asm_.take_message();
+        attempt_result.usage = asm_.usage();
+        attempt_result.finish_reason = asm_.finish_reason();
+        attempt_result.model = asm_.model().empty() ? cfg_.model : asm_.model();
+
+        bool transient = false;
+        if (r.cancelled) {
+            attempt_result.error = "cancelled";
+        } else if (!r.error.empty()) {
+            attempt_result.error = "network: " + r.error;
+            transient = retryable_transport(r.error);
+        } else if (r.status < 200 || r.status >= 300) {
+            attempt_result.error = extract_error(r.body, r.status);
+            transient = retryable_status(r.status);
+        } else if (asm_.had_error()) {
+            attempt_result.error = asm_.error();
+            // Mid-stream provider errors are frequently rate limits.
+            std::string e = to_lower(attempt_result.error);
+            transient = e.find("rate") != std::string::npos ||
+                        e.find("overloaded") != std::string::npos ||
+                        e.find("try again") != std::string::npos ||
+                        e.find("capacity") != std::string::npos;
+        } else if (attempt_result.message.content.empty() &&
+                   attempt_result.message.tool_calls.empty()) {
+            attempt_result.error = "empty response from model";
+            transient = true;   // usually an upstream hiccup
+        } else {
+            attempt_result.ok = true;
+        }
+
+        if (attempt_result.ok || attempt_result.cancelled) return attempt_result;
+
+        bool can_retry = transient && !emitted && (attempt + 1 < attempts);
+        if (!can_retry) {
+            if (emitted && transient)
+                attempt_result.error +=
+                    " (not retried: part of the reply had already been shown)";
+            return attempt_result;
+        }
+
+        int wait = backoff_ms(attempt);
+        log_line("retrying after " + std::to_string(wait) + "ms: " +
+                 attempt_result.error);
+        if (ev.on_reasoning) {
+            // Surface the wait so the UI does not look hung.
+        }
+        sleep_ms(wait, cancel);
+        out = attempt_result;   // keep the last error if we run out of attempts
+    }
     return out;
 }
 

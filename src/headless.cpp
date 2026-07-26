@@ -167,6 +167,7 @@ int run_headless(Agent& agent, const Config& cfg, const HeadlessOptions& opt) {
         out["usage"] = {{"prompt_tokens", r.usage.prompt_tokens},
                         {"completion_tokens", r.usage.completion_tokens},
                         {"total_tokens", r.usage.total_tokens},
+                        {"cached_tokens", r.usage.cached_tokens},
                         {"cost", r.usage.cost}};
         if (!r.error.empty()) out["error"] = r.error;
         emit(out);
@@ -183,9 +184,17 @@ int run_headless(Agent& agent, const Config& cfg, const HeadlessOptions& opt) {
         if (!r.error.empty()) out["error"] = r.error;
         emit(out);
     } else if (!opt.quiet && r.usage.total_tokens > 0) {
-        std::fprintf(stderr, "[%lld tokens, %d round%s]\n",
-                     static_cast<long long>(r.usage.total_tokens), r.rounds,
-                     r.rounds == 1 ? "" : "s");
+        std::string cache;
+        if (r.usage.cached_tokens > 0) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), ", %lld cached (%.0f%%)",
+                          static_cast<long long>(r.usage.cached_tokens),
+                          r.usage.cache_hit_rate() * 100.0);
+            cache = buf;
+        }
+        std::fprintf(stderr, "[%lld tokens%s, %d round%s, $%.4f]\n",
+                     static_cast<long long>(r.usage.total_tokens), cache.c_str(),
+                     r.rounds, r.rounds == 1 ? "" : "s", r.usage.cost);
     }
 
     return r.ok ? 0 : 1;

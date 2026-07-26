@@ -102,11 +102,25 @@ struct Usage {
     int64_t completion_tokens = 0;
     int64_t total_tokens = 0;
     double cost = 0.0;
+
+    // Prompt-cache accounting, so the saving from caching the system message is
+    // observable rather than assumed.
+    int64_t cached_tokens = 0;      // prompt tokens served from cache
+    int64_t cache_write_tokens = 0; // tokens written into the cache
+
     void add(const Usage& o) {
         prompt_tokens += o.prompt_tokens;
         completion_tokens += o.completion_tokens;
         total_tokens += o.total_tokens;
         cost += o.cost;
+        cached_tokens += o.cached_tokens;
+        cache_write_tokens += o.cache_write_tokens;
+    }
+    // Fraction of prompt tokens that came from cache.
+    double cache_hit_rate() const {
+        return prompt_tokens > 0
+                   ? static_cast<double>(cached_tokens) / static_cast<double>(prompt_tokens)
+                   : 0.0;
     }
 };
 

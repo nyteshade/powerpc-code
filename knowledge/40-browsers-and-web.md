@@ -16,7 +16,9 @@ Do not assume the built-in browser is usable for anything on the live web.
 **PowerFox** is an actively maintained modern browser for PowerPC Macs — the most
 capable option available in 2026.
 
-- Latest version: **26.1.0**
+- Latest PowerPC release as of writing: **26.2.2 Beta** (March 2026). This moves,
+  so check <https://powerfox.jazzzny.me/download.html> rather than trusting this
+  number.
 - Requires Mac OS X **10.5 Leopard** or Snow Leopard, PowerPC **G4 or G5**; a
   1 GHz or faster CPU is recommended for video playback.
 - Built on the **UXP** engine via **Basilisk**, both descended from Firefox, so it

@@ -673,6 +673,73 @@ void test_render() {
         check(num, "number highlighted");
         check(com, "comment highlighted");
     }
+    // Objective-C is the primary language on this platform, so its distinctive
+    // syntax has to be highlighted properly rather than run through the C++
+    // tokenizer.
+    {
+        const char* objc =
+            "@interface Greeter : NSObject {\n"
+            "    NSString *_name;   // ivar\n"
+            "}\n"
+            "@property (nonatomic, retain) NSString *name;\n"
+            "@end\n"
+            "\n"
+            "@implementation Greeter\n"
+            "- (void)greetWithName:(NSString *)who count:(NSInteger)n {\n"
+            "    if (who == nil) return;\n"
+            "    NSLog(@\"hello %@\", who);\n"
+            "    [self doThing:who withOther:n];\n"
+            "}\n"
+            "@end\n";
+        auto lines = render::highlight(objc, "objc", 100);
+        bool at_directive = false, ns_type = false, at_string = false;
+        bool nil_const = false, selector = false, comment = false;
+        for (const auto& l : lines)
+            for (const auto& s : l.spans) {
+                if (s.style == render::Style::Keyword &&
+                    starts_with(s.text, "@interface")) at_directive = true;
+                if (s.style == render::Style::Keyword &&
+                    starts_with(s.text, "@property")) at_directive = true;
+                if (s.style == render::Style::Type && s.text == "NSString") ns_type = true;
+                if (s.style == render::Style::String &&
+                    starts_with(s.text, "@\"")) at_string = true;
+                if (s.style == render::Style::Constant && s.text == "nil") nil_const = true;
+                if (s.style == render::Style::Function && s.text == "withOther")
+                    selector = true;
+                if (s.style == render::Style::Comment) comment = true;
+            }
+        check(at_directive, "objc @-directives highlighted as keywords");
+        check(ns_type, "NS-prefixed framework types highlighted");
+        check(at_string, "@\"literal\" highlighted as a string including the @");
+        check(nil_const, "nil highlighted as a constant");
+        check(selector, "message-send selector parts highlighted");
+        check(comment, "objc comments highlighted");
+    }
+    check(render::language_supported("objc"), "objc highlighter present");
+    check(render::language_supported("m"), ".m maps to the objc highlighter");
+    check(render::language_supported("mm"), ".mm maps to objective-c++");
+    {
+        // A .mm file gets C++ keywords too.
+        auto lines = render::highlight("std::vector<int> v; @autoreleasepool { }",
+                                       "objcpp", 100);
+        bool cpp_type = false, at_kw = false;
+        for (const auto& l : lines)
+            for (const auto& s : l.spans) {
+                if (s.style == render::Style::Type && s.text == "vector") cpp_type = true;
+                if (s.style == render::Style::Keyword &&
+                    starts_with(s.text, "@autoreleasepool")) at_kw = true;
+            }
+        check(cpp_type && at_kw, "objective-c++ gets both C++ and ObjC syntax");
+    }
+    {
+        // Outside a message send, "label:" must not be mistaken for a selector.
+        auto lines = render::highlight("int x = a ? b : c;", "objc", 80);
+        bool bad = false;
+        for (const auto& l : lines)
+            for (const auto& s : l.spans)
+                if (s.style == render::Style::Function && s.text == "b") bad = true;
+        check(!bad, "ternary is not mistaken for a selector");
+    }
     check(render::language_supported("python"), "python highlighter present");
     check(render::language_supported("sh"), "shell highlighter present");
     check(render::language_supported("diff"), "diff highlighter present");
