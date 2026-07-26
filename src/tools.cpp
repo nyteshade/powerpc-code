@@ -1,5 +1,7 @@
 #include "tools.hpp"
 
+#include "checkpoint.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
@@ -296,12 +298,18 @@ ToolResult tool_write_file(const json& a, ToolContext& ctx) {
     fs::path p(full);
     if (p.has_parent_path()) fs::create_directories(p.parent_path(), ec);
 
+    checkpoint::store().record_before(full, "write_file");
     std::string werr;
     if (!write_file_text(full, content, &werr)) return ToolResult::err(werr);
+    std::string diff = checkpoint::store().record_after(full);
 
     size_t nlines = split(content, '\n').size();
-    return ToolResult::ok("Wrote " + std::to_string(content.size()) + " bytes (" +
-                          std::to_string(nlines) + " lines) to " + path);
+    std::string out = "Wrote " + std::to_string(content.size()) + " bytes (" +
+                      std::to_string(nlines) + " lines) to " + path;
+    // A diff is what tells the caller whether the right thing changed; a byte
+    // count does not.
+    if (!diff.empty()) out += "\n\n" + elide(diff, 4000);
+    return ToolResult::ok(out);
 }
 
 // ---- edit_file ------------------------------------------------------------
@@ -354,11 +362,15 @@ ToolResult tool_edit_file(const json& a, ToolContext& ctx) {
         replaced = 1;
     }
 
+    checkpoint::store().record_before(full, "edit_file");
     std::string werr;
     if (!write_file_text(full, text, &werr)) return ToolResult::err(werr);
+    std::string diff = checkpoint::store().record_after(full);
 
-    return ToolResult::ok("Replaced " + std::to_string(replaced) +
-                          (replaced == 1 ? " occurrence in " : " occurrences in ") + path);
+    std::string out = "Replaced " + std::to_string(replaced) +
+                      (replaced == 1 ? " occurrence in " : " occurrences in ") + path;
+    if (!diff.empty()) out += "\n\n" + elide(diff, 4000);
+    return ToolResult::ok(out);
 }
 
 // ---- list_dir -------------------------------------------------------------

@@ -4,6 +4,7 @@
 // costs real wall-clock time, so batching several edits or several file reads
 // into one call is a meaningful speedup, not just tidiness.
 #include "jobs.hpp"
+#include "checkpoint.hpp"
 #include "tools.hpp"
 
 #include <algorithm>
@@ -112,9 +113,14 @@ ToolResult tool_multi_edit(const json& a, ToolContext& ctx) {
         }
     }
 
+    checkpoint::store().record_before(full, "multi_edit");
     std::string werr;
     if (!write_file_text(full, working, &werr)) return ToolResult::err(werr);
+    std::string diff = checkpoint::store().record_after(full);
 
+    if (!diff.empty())
+        return ToolResult::ok("Applied " + std::to_string(edits->size()) +
+                              " edits to " + path + "\n\n" + elide(diff, 4000));
     return ToolResult::ok("Applied " + std::to_string(edits->size()) + " edit" +
                           (edits->size() == 1 ? "" : "s") + " (" +
                           std::to_string(applied) + " replacement" +

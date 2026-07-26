@@ -11,6 +11,7 @@
 #include "ui.hpp"
 
 #include "jobs.hpp"
+#include "checkpoint.hpp"
 #include "session.hpp"
 #include "render.hpp"
 #include "utf8.hpp"
@@ -403,6 +404,11 @@ void Tui::rewrap(int width) {
         std::vector<render::Line> lines;
         if (e.markdown) {
             lines = render::markdown(e.text, static_cast<size_t>(avail), fancy());
+        } else if (e.kind == Kind::ToolOutput &&
+                   e.text.find("\n@@ ") != std::string::npos) {
+            // Tool output containing a unified diff is worth colouring: added
+            // and removed lines are the whole point of showing it.
+            lines = render::highlight(e.text, "diff", static_cast<size_t>(avail));
         } else {
             lines = render::plain_lines(e.text, static_cast<size_t>(avail), base);
         }
@@ -956,6 +962,8 @@ bool Tui::handle_slash(const std::string& line) {
             "  /yolo           toggle approving every tool automatically\n"
             "  /unicode        toggle box-drawing and typographic characters\n"
             "  /clear          start a fresh conversation\n"
+            "  /undo [n]       revert the last n file changes (default 1)\n"
+            "  /changes        list files changed this session\n"
             "  /compact        summarise the conversation to free up context\n"
             "  /sessions       list saved sessions\n"
             "  /save PATH      write this session to a file\n"
@@ -1075,6 +1083,25 @@ bool Tui::handle_slash(const std::string& line) {
         std::string out;
         for (const std::string& l : mcp_->status_lines()) out += "  " + l + "\n";
         add(Kind::Info, "MCP servers:\n" + out);
+        return true;
+    }
+    if (cmd == "/undo") {
+        int n = rest.empty() ? 1 : std::atoi(rest.c_str());
+        if (n <= 0) n = 1;
+        std::string report;
+        int done = checkpoint::store().undo(n, &report);
+        add(done > 0 ? Kind::Info : Kind::Error, report);
+        return true;
+    }
+    if (cmd == "/changes") {
+        std::vector<checkpoint::Entry> h = checkpoint::store().history(20);
+        if (h.empty()) { add(Kind::Info, "no file changes recorded"); return true; }
+        std::string out;
+        for (const checkpoint::Entry& e : h)
+            out += "  " + e.path + "  (" + e.tool + ", " +
+                   checkpoint::diff_stat(e.before, e.after) + ")\n";
+        add(Kind::Info, "files changed this session, newest first:\n" + out +
+                        "\nrevert with /undo [n]");
         return true;
     }
     if (cmd == "/compact") {

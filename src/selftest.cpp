@@ -6,6 +6,7 @@
 #include "agent.hpp"
 #include "appledocs.hpp"
 #include "builderr.hpp"
+#include "checkpoint.hpp"
 #include "attach.hpp"
 #include "common.hpp"
 #include "config.hpp"
@@ -795,6 +796,68 @@ void test_web() {
     }
 }
 
+void test_checkpoint() {
+    std::printf("[checkpoint / diff]\n");
+
+    check(checkpoint::unified_diff("same", "same", "f").empty(),
+          "identical text produces no diff");
+    {
+        std::string d = checkpoint::unified_diff("a\nb\nc\n", "a\nB\nc\n", "f.txt");
+        check(d.find("-b") != std::string::npos, "removed line marked");
+        check(d.find("+B") != std::string::npos, "added line marked");
+        check(d.find(" a") != std::string::npos, "context line kept");
+        check(d.find("@@") != std::string::npos, "hunk header present");
+    }
+    check(checkpoint::diff_stat("a\n", "a\nb\n").find("+1") != std::string::npos,
+          "diff stat counts additions");
+    check(checkpoint::diff_stat("x", "x") == "no change", "diff stat on no change");
+
+    // Round trip through the store, including undo of both a modification and a
+    // creation.
+    std::string dir = "/tmp/ppcode-ckpt";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    std::string f = dir + "/a.txt";
+    write_file_text(f, "original\n", nullptr);
+
+    checkpoint::Store s;
+    s.record_before(f, "edit_file");
+    write_file_text(f, "modified\n", nullptr);
+    std::string diff = s.record_after(f);
+    check(!diff.empty(), "store produces a diff");
+    check(diff.find("-original") != std::string::npos, "diff shows the old line");
+    check(s.size() == 1, "one entry recorded");
+
+    std::string report;
+    check(s.undo(1, &report) == 1, "undo reverts one change");
+    std::string back;
+    read_file_text(f, &back, nullptr);
+    check(back == "original\n", "file contents restored");
+    check(s.size() == 0, "entry consumed");
+
+    // Undoing a creation must delete the file, not leave an empty one.
+    std::string nf = dir + "/new.txt";
+    s.record_before(nf, "write_file");
+    write_file_text(nf, "created\n", nullptr);
+    s.record_after(nf);
+    check(fs::exists(nf), "file created");
+    s.undo(1, &report);
+    check(!fs::exists(nf), "undoing a creation removes the file");
+
+    check(s.undo(1, &report) == 0 && report.find("nothing") != std::string::npos,
+          "undo with empty history reports cleanly");
+
+    // A write that changes nothing should not be recorded, or undo would be
+    // cluttered with no-ops.
+    write_file_text(f, "same\n", nullptr);
+    s.record_before(f, "edit_file");
+    write_file_text(f, "same\n", nullptr);
+    check(s.record_after(f).empty(), "unchanged write produces no diff");
+    check(s.size() == 0, "and is not recorded");
+
+    fs::remove_all(dir);
+}
+
 void test_session() {
     std::printf("[sessions]\n");
     check(!session::sessions_dir().empty(), "sessions directory resolves");
@@ -1333,6 +1396,7 @@ int run_selftest(bool with_network) {
     test_render();
     test_web();
     test_plist_and_xcode();
+    test_checkpoint();
     test_session();
     test_builderr();
     test_project_docs();
