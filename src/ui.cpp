@@ -114,6 +114,7 @@ public:
 
     render::ColorDepth depth() const { return depth_; }
     bool custom() const { return custom_; }
+    bool has_color() const { return has_color_; }
 
 private:
     static constexpr int kCount = static_cast<int>(render::Style::Count_);
@@ -300,6 +301,8 @@ private:
     EventQueue queue_;
     ApprovalGate gate_;
     Palette pal_;
+    // What ncurses actually granted, which is not always what was requested.
+    mmask_t mouse_mask_ = 0;
     Picker picker_;
     ModelCatalog catalog_;
     std::vector<commands::Command> user_commands_;
@@ -991,6 +994,7 @@ bool Tui::handle_slash(const std::string& line) {
             "  /tools          list available tools\n"
             "  /mcp            show connected MCP servers\n"
             "  /env [level]    show machine context, or set the detail level\n"
+            "  /term           report what this terminal negotiated\n"
             "  /jobs           list background jobs\n"
             "  /todo           show the current plan\n"
             "  /cwd [dir]      show or change the working directory\n"
@@ -1088,6 +1092,87 @@ bool Tui::handle_slash(const std::string& line) {
         }
         envinfo::Probe p = envinfo::probe(false);
         add(Kind::Info, envinfo::render(p, envinfo::Detail::Standard));
+        return true;
+    }
+    if (cmd == "/term") {
+        // Brielle runs iTerm 2.0 Legacy rather than Apple's Terminal, and the
+        // two disagree about colour and mouse reporting. Every value here has
+        // been guessed at during some earlier debugging session; printing what
+        // was actually negotiated turns those guesses into facts.
+        auto env_or = [](const char* k, const char* fallback) {
+            const char* v = std::getenv(k);
+            return (v && *v) ? std::string(v) : std::string(fallback);
+        };
+
+        std::string out;
+        out += "terminal\n";
+        out += "  TERM             " + env_or("TERM", "(unset)") + "\n";
+        out += "  COLORTERM        " + env_or("COLORTERM", "(unset)") + "\n";
+        out += "  TERM_PROGRAM     " + env_or("TERM_PROGRAM", "(unset)") + "\n";
+        out += "  size             " + std::to_string(COLS) + "x" +
+               std::to_string(LINES) + "\n";
+        out += "  ncurses          " + std::string(curses_version()) + "\n";
+
+        out += "\ncolour\n";
+        out += "  has_colors()     " + std::string(has_colors() ? "yes" : "no") + "\n";
+        out += "  COLORS           " + std::to_string(COLORS) + "\n";
+        out += "  COLOR_PAIRS      " + std::to_string(COLOR_PAIRS) + "\n";
+        out += "  can_change_color " +
+               std::string(can_change_color() ? "yes" : "no") + "\n";
+        out += "  in use           " + render::depth_name(pal_.depth());
+        if (!pal_.has_color()) out += " (colour disabled)";
+        else if (pal_.custom()) out += ", exact RGB via redefinable palette";
+        out += "\n";
+
+        out += "\nmouse\n";
+        if (mouse_mask_ == 0) {
+            out += "  reporting        REFUSED -- terminfo for this TERM has no\n"
+                   "                   mouse capability, so wheel scrolling and\n"
+                   "                   clicks will not work\n";
+        } else {
+            out += "  reporting        accepted\n";
+            out += "  granted mask     0x" + [&] {
+                char buf[32];
+                std::snprintf(buf, sizeof buf, "%lx",
+                              static_cast<unsigned long>(mouse_mask_));
+                return std::string(buf);
+            }() + "\n";
+            bool wheel = (mouse_mask_ & BUTTON4_PRESSED) != 0;
+            out += "  wheel up         " +
+                   std::string(wheel ? "yes" : "NO -- scrolling will not work") + "\n";
+            out += "  position events  " +
+                   std::string((mouse_mask_ & REPORT_MOUSE_POSITION) ? "yes" : "no") +
+                   "\n";
+        }
+
+        out += "\ntext\n";
+        out += "  LANG             " + env_or("LANG", "(unset)") + "\n";
+        out += "  LC_ALL           " + env_or("LC_ALL", "(unset)") + "\n";
+        out += "  LC_CTYPE         " + env_or("LC_CTYPE", "(unset)") + "\n";
+        const char* codeset = nl_langinfo(CODESET);
+        out += "  charset          " +
+               std::string(codeset && *codeset ? codeset : "(unknown)") + "\n";
+        out += "  UTF-8 locale     " + std::string(utf8_ok_ ? "yes" : "no") + "\n";
+        out += "  drawing          " +
+               std::string(fancy() ? "box-drawing and typographic characters"
+                                   : "ASCII only");
+        if (!utf8_ok_) out += " (no UTF-8 locale; see below)";
+        else if (!cfg_.unicode) out += " (/unicode is off)";
+        out += "\n";
+
+        if (!utf8_ok_) {
+            out += "\nLC_CTYPE is not a UTF-8 locale, which makes ncurses treat "
+                   "every byte as\nits own character and paints multi-byte text "
+                   "as garbage. Set\n  export LANG=en_US.UTF-8\nin your shell "
+                   "profile.\n";
+        }
+        if (mouse_mask_ == 0) {
+            out += "\nNo mouse reporting for TERM=" + env_or("TERM", "?") +
+                   ". iTerm 2.0 Legacy generally works as\nxterm-256color; try "
+                   "setting TERM to that.\n";
+        }
+
+        add(Kind::Info, out);
         return true;
     }
     if (cmd == "/jobs") {
@@ -1483,7 +1568,12 @@ int Tui::run() {
 
     // Mouse reporting. mouseinterval(0) stops ncurses waiting to synthesise
     // click events, which keeps wheel scrolling responsive.
-    mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, nullptr);
+    //
+    // The granted mask is kept because it is not always the one asked for:
+    // terminfo decides what the terminal can actually do, and a mismatch here is
+    // the difference between "the wheel does nothing" and "the wheel is broken".
+    // /term reports it rather than leaving it to be guessed at.
+    mouse_mask_ = mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, nullptr);
     mouseinterval(0);
 
     pal_.init(cfg_.color);

@@ -26,6 +26,12 @@ DEFAULT_ENV = {
     "COLUMNS": "100",
 }
 
+# Overridable, because what the terminal claims to be is exactly what /term
+# exists to investigate: TERM=vt100 has no mouse capability, TERM=dumb has no
+# colour, and both need to be exercised.
+if os.environ.get("PPCODE_DRIVE_TERM"):
+    DEFAULT_ENV["TERM"] = os.environ["PPCODE_DRIVE_TERM"]
+
 
 def drive(argv, steps, settle=1.5):
     env = dict(os.environ)
