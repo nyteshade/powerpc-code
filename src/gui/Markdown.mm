@@ -79,38 +79,47 @@ static NSColor *CodeColorForStyle(render::Style s) {
 
     // Comments
     case render::Style::Comment:
+
       return Rgb(0x00, 0x74, 0x00);
 
     // Strings and characters
     case render::Style::String:
+
       return Rgb(0xC4, 0x1A, 0x16);
 
     // Numeric literals
     case render::Style::Number:
+
       return Rgb(0x1C, 0x00, 0xCF);
 
     // Language keywords and @-directives
     case render::Style::Keyword:
+
       return Rgb(0xAA, 0x0D, 0x91);
 
     // Framework and built-in types
     case render::Style::Type:
+
       return Rgb(0x3F, 0x6E, 0x75);
 
     // Preprocessor
     case render::Style::Preproc:
+
       return Rgb(0x64, 0x38, 0x20);
 
     // Constants such as nil, YES, true
     case render::Style::Constant:
+
       return Rgb(0x1C, 0x00, 0xCF);
 
     // Call and selector names
     case render::Style::Function:
+
       return Rgb(0x26, 0x47, 0x4B);
 
     // Everything else in a code block
     default:
+
       return Rgb(0x20, 0x20, 0x20);
   }
 }

@@ -61,8 +61,8 @@
 
 // A view that fills itself with leather and stitches its edges.
 @interface PPLeatherView : NSView {
-    BOOL dark;
-    BOOL stitched;
+  BOOL dark;
+  BOOL stitched;
 }
 - (void)setDark:(BOOL)d;
 - (void)setStitched:(BOOL)s;
@@ -70,7 +70,7 @@
 
 // A view that fills itself with ruled writing paper.
 @interface PPPaperView : NSView {
-    BOOL ruled;
+  BOOL ruled;
 }
 - (void)setRuled:(BOOL)r;
 @end

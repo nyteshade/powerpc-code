@@ -33,11 +33,11 @@
 struct BridgeState;
 
 @interface PPBridge : NSObject {
-    // Under the fragile Objective-C ABI that GCC targets here, instance
-    // variables must be declared in the @interface -- declaring them in the
-    // @implementation block is a non-fragile-ABI feature and is rejected.
-    struct BridgeState *st;
-    id delegate;
+  // Under the fragile Objective-C ABI that GCC targets here, instance
+  // variables must be declared in the @interface -- declaring them in the
+  // @implementation block is a non-fragile-ABI feature and is rejected.
+  struct BridgeState *st;
+  id delegate;
 }
 
 - (id)init;
