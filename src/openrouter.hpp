@@ -234,6 +234,8 @@ public:
 
     const Config& config() const { return cfg_; }
     void set_model(const std::string& m) { cfg_.model = m; }
+    void set_api_key(const std::string& k) { cfg_.api_key = k; }
+    void set_config(const Config& c) { cfg_ = c; }
 
 private:
     Config cfg_;

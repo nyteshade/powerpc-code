@@ -12,6 +12,8 @@
 #import <Cocoa/Cocoa.h>
 
 #import "GuiBridge.h"
+#import "Settings.h"
+#import "Skin.h"
 
 #include <string.h>
 
@@ -114,10 +116,12 @@
     NSProgressIndicator *spinner;
     NSButton *sendButton;
     PPBridge *bridge;
+    PPSettingsController *settings;
     BOOL streaming;
 }
 - (void)send:(id)sender;
 - (void)attachmentsChanged;
+- (void)showSettings:(id)sender;
 - (void)buildWindow;
 - (void)populateModels;
 - (void)reloadSessions;
@@ -324,6 +328,20 @@
          "attach them. Return sends, Option-Return inserts a newline.\n\n",
         [bridge workingDirectory], [bridge modelId],
         [bridge modelSupportsImages] ? @" (can see images)" : @" (text only)"]];
+
+    // Without a key nothing works, and an application launched from the Finder
+    // does not inherit a key exported in a shell profile. Say so plainly and
+    // open the place where it is set.
+    if (![bridge hasApiKey]) {
+        [self append:@"No OpenRouter key is configured.\n"
+               color:[NSColor redColor] bold:YES mono:NO];
+        [self appendPlain:
+            @"An application launched from the Finder does not inherit your shell "
+             "environment, so a key exported in .zshrc is invisible here. Set one "
+             "in Settings (Command-comma); it is stored in your config file with "
+             "owner-only permissions.\n\n"];
+        [self showSettings:nil];
+    }
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app {
@@ -384,6 +402,14 @@
     [composer clearAttachments];
     [self attachmentsChanged];
     [text release];
+}
+
+- (void)showSettings:(id)sender {
+  if (!settings) {
+    settings = [[PPSettingsController alloc] initWithBridge:bridge];
+  }
+
+  [settings showWindow];
 }
 
 - (void)newConversation:(id)sender {
@@ -525,35 +551,99 @@
 // ---------------------------------------------------------------------------
 
 static void buildMenuBar(void) {
-    // The menu bar belongs to the application: every command lives here, with a
-    // keyboard equivalent, whether or not there is also a button for it.
-    NSMenu *bar = [[[NSMenu alloc] initWithTitle:@""] autorelease];
-    [NSApp setMainMenu:bar];
+  // AppKit decides which menu is the application menu, and without being told
+  // it synthesises an empty one of its own -- which is why the name appeared
+  // twice, once bold and empty and once with the real items. -setAppleMenu: is
+  // how a code-built menu bar claims that slot on this system.
+  NSMenu *bar = [[[NSMenu alloc] initWithTitle:@""] autorelease];
+  [NSApp setMainMenu:bar];
 
-    NSMenuItem *appItem = [bar addItemWithTitle:@"" action:NULL keyEquivalent:@""];
-    NSMenu *appMenu = [[[NSMenu alloc] initWithTitle:@"ppcode"] autorelease];
-    [appMenu addItemWithTitle:@"About ppcode"
-                       action:@selector(orderFrontStandardAboutPanel:)
-                keyEquivalent:@""];
-    [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"Hide ppcode" action:@selector(hide:) keyEquivalent:@"h"];
-    [appMenu addItemWithTitle:@"Quit ppcode" action:@selector(terminate:) keyEquivalent:@"q"];
-    [appItem setSubmenu:appMenu];
+  NSString *appName = [[NSProcessInfo processInfo] processName];
 
-    NSMenuItem *fileItem = [bar addItemWithTitle:@"" action:NULL keyEquivalent:@""];
-    NSMenu *fileMenu = [[[NSMenu alloc] initWithTitle:@"File"] autorelease];
-    [fileMenu addItemWithTitle:@"New Conversation"
-                        action:@selector(newConversation:)
-                 keyEquivalent:@"n"];
-    [fileItem setSubmenu:fileMenu];
+  // --- Application ---------------------------------------------------------
+  NSMenuItem *appItem = [bar addItemWithTitle:@"" action:NULL keyEquivalent:@""];
+  NSMenu *appMenu = [[[NSMenu alloc] initWithTitle:appName] autorelease];
 
-    NSMenuItem *editItem = [bar addItemWithTitle:@"" action:NULL keyEquivalent:@""];
-    NSMenu *editMenu = [[[NSMenu alloc] initWithTitle:@"Edit"] autorelease];
-    [editMenu addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
-    [editMenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
-    [editMenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
-    [editMenu addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
-    [editItem setSubmenu:editMenu];
+  [appMenu addItemWithTitle:[@"About " stringByAppendingString:appName]
+                     action:@selector(orderFrontStandardAboutPanel:)
+              keyEquivalent:@""];
+  [appMenu addItem:[NSMenuItem separatorItem]];
+
+  [[appMenu addItemWithTitle:@"Settings…"
+                      action:@selector(showSettings:)
+               keyEquivalent:@","] setKeyEquivalentModifierMask:NSCommandKeyMask];
+  [appMenu addItem:[NSMenuItem separatorItem]];
+
+  NSMenuItem *services = [appMenu addItemWithTitle:@"Services"
+                                            action:NULL
+                                     keyEquivalent:@""];
+  NSMenu *servicesMenu = [[[NSMenu alloc] initWithTitle:@"Services"] autorelease];
+  [services setSubmenu:servicesMenu];
+  [NSApp setServicesMenu:servicesMenu];
+  [appMenu addItem:[NSMenuItem separatorItem]];
+
+  [appMenu addItemWithTitle:[@"Hide " stringByAppendingString:appName]
+                     action:@selector(hide:)
+              keyEquivalent:@"h"];
+  [[appMenu addItemWithTitle:@"Hide Others"
+                      action:@selector(hideOtherApplications:)
+               keyEquivalent:@"h"]
+      setKeyEquivalentModifierMask:NSCommandKeyMask | NSAlternateKeyMask];
+  [appMenu addItemWithTitle:@"Show All"
+                     action:@selector(unhideAllApplications:)
+              keyEquivalent:@""];
+  [appMenu addItem:[NSMenuItem separatorItem]];
+
+  [appMenu addItemWithTitle:[@"Quit " stringByAppendingString:appName]
+                     action:@selector(terminate:)
+              keyEquivalent:@"q"];
+  [appItem setSubmenu:appMenu];
+
+  // This is the line that prevents the duplicate. It is not in the public
+  // headers on 10.5, hence the guarded perform.
+  if ([NSApp respondsToSelector:@selector(setAppleMenu:)]) {
+    [NSApp performSelector:@selector(setAppleMenu:) withObject:appMenu];
+  }
+
+  // --- File ----------------------------------------------------------------
+  NSMenuItem *fileItem = [bar addItemWithTitle:@"" action:NULL keyEquivalent:@""];
+  NSMenu *fileMenu = [[[NSMenu alloc] initWithTitle:@"File"] autorelease];
+
+  [fileMenu addItemWithTitle:@"New Conversation"
+                      action:@selector(newConversation:)
+               keyEquivalent:@"n"];
+  [fileMenu addItem:[NSMenuItem separatorItem]];
+  [fileMenu addItemWithTitle:@"Close"
+                      action:@selector(performClose:)
+               keyEquivalent:@"w"];
+  [fileItem setSubmenu:fileMenu];
+
+  // --- Edit ----------------------------------------------------------------
+  NSMenuItem *editItem = [bar addItemWithTitle:@"" action:NULL keyEquivalent:@""];
+  NSMenu *editMenu = [[[NSMenu alloc] initWithTitle:@"Edit"] autorelease];
+
+  [editMenu addItemWithTitle:@"Undo" action:@selector(undo:) keyEquivalent:@"z"];
+  [[editMenu addItemWithTitle:@"Redo" action:@selector(redo:) keyEquivalent:@"z"]
+      setKeyEquivalentModifierMask:NSCommandKeyMask | NSShiftKeyMask];
+  [editMenu addItem:[NSMenuItem separatorItem]];
+  [editMenu addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
+  [editMenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+  [editMenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+  [editMenu addItemWithTitle:@"Select All"
+                      action:@selector(selectAll:)
+               keyEquivalent:@"a"];
+  [editItem setSubmenu:editMenu];
+
+  // --- Window --------------------------------------------------------------
+  NSMenuItem *windowItem = [bar addItemWithTitle:@"" action:NULL keyEquivalent:@""];
+  NSMenu *windowMenu = [[[NSMenu alloc] initWithTitle:@"Window"] autorelease];
+
+  [windowMenu addItemWithTitle:@"Minimize"
+                        action:@selector(performMiniaturize:)
+                 keyEquivalent:@"m"];
+  [windowMenu addItemWithTitle:@"Zoom" action:@selector(performZoom:) keyEquivalent:@""];
+  [windowItem setSubmenu:windowMenu];
+  [NSApp setWindowsMenu:windowMenu];
 }
 
 // Walk a view tree and count what is actually there. Used by --check, because

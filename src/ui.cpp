@@ -12,6 +12,7 @@
 
 #include "jobs.hpp"
 #include "checkpoint.hpp"
+#include "commands.hpp"
 #include "session.hpp"
 #include "render.hpp"
 #include "utf8.hpp"
@@ -301,6 +302,7 @@ private:
     Palette pal_;
     Picker picker_;
     ModelCatalog catalog_;
+    std::vector<commands::Command> user_commands_;
     JobManager jobs_;
 
     std::thread worker_;
@@ -481,10 +483,33 @@ void Tui::draw_transcript(int top, int height, int width) {
 }
 
 void Tui::draw_status(int row, int width) {
-    std::string left;
     if (approving_) {
-        left = "APPROVE?  type y / n / a then Enter   (Ctrl+Y yes, Ctrl+N no)";
-    } else if (busy_.load()) {
+        // Line one names the choices, line two says how to commit them.
+        // Both lines are sized to fit 80 columns, the narrowest terminal worth
+        // supporting; anything wider just gets trailing space.
+        std::string l1 = " Run this tool?   y = yes once   n = no, skip"
+                         "   a = yes to all from now on";
+        std::string l2 = " Type a letter then Enter."
+                         "   Shortcuts: Ctrl+Y = yes, Ctrl+N = no, Esc = no.";
+
+        int a = pal_.attr(render::Style::Bar);
+        attron(a);
+        for (int r = 0; r < 2; r++) {
+            move(row + r, 0);
+            clrtoeol();
+            std::string line = (r == 0) ? l1 : l2;
+            size_t wid = static_cast<size_t>(width);
+            if (utf8::width(line) < wid)
+                line += std::string(wid - utf8::width(line), ' ');
+            mvaddstr(row + r, 0,
+                     utf8::truncate_to_width(line, wid).c_str());
+        }
+        attroff(a);
+        return;
+    }
+
+    std::string left;
+    if (busy_.load()) {
         static const char* frames = "|/-\\";
         left = std::string(1, frames[spinner_ % 4]) + " " +
                (status_text_.empty() ? "working" : status_text_);
@@ -695,13 +720,16 @@ void Tui::draw() {
     }
 
     int in_rows = input_rows(w);
-    if (in_rows > h - 3) in_rows = std::max(1, h - 3);
-    int trans_h = h - in_rows - 1;
+    // An approval prompt gets two rows: one naming each choice, one saying how
+    // to answer. Compressing that onto the single status line made it unreadable.
+    int status_rows = approving_ ? 2 : 1;
+    if (in_rows > h - status_rows - 2) in_rows = std::max(1, h - status_rows - 2);
+    int trans_h = h - in_rows - status_rows;
     if (trans_h < 1) trans_h = 1;
 
     draw_transcript(0, trans_h, w);
     draw_status(trans_h, w);
-    draw_input(trans_h + 1, in_rows, w);
+    draw_input(trans_h + status_rows, in_rows, w);
 
     if (picker_.active) {
         draw_picker(w, h);
@@ -949,7 +977,14 @@ bool Tui::handle_slash(const std::string& line) {
     std::string rest = trim(line.size() > cmd.size() ? line.substr(cmd.size()) : "");
 
     if (cmd == "/help") {
+        std::string extra;
+        for (const commands::Command& c : user_commands_)
+            extra += "  /" + c.name + std::string(c.name.size() < 14 ? 14 - c.name.size() : 1, ' ') +
+                     (c.description.empty() ? c.source_path : c.description) + "\n";
+        if (!extra.empty()) extra = "\nYour commands:\n" + extra;
+
         add(Kind::Info,
+            std::string(
             "Commands:\n"
             "  /model [id]     open the model picker, or set a model directly\n"
             "  /models [sub]   list models matching a substring\n"
@@ -979,7 +1014,7 @@ bool Tui::handle_slash(const std::string& line) {
             "  PgUp/PgDn scroll, Shift+Up/Down scroll a line, Home/End of input\n"
             "  Ctrl+Home top of transcript, Ctrl+End live tail\n"
             "  Mouse wheel scrolls the transcript\n"
-            "  Up/Down recall previous inputs, Ctrl+W delete a word");
+            "  Up/Down recall previous inputs, Ctrl+W delete a word") + extra);
         return true;
     }
     if (cmd == "/quit" || cmd == "/exit") { quit_.store(true); return true; }
@@ -1195,7 +1230,20 @@ bool Tui::handle_slash(const std::string& line) {
         }
         return true;
     }
+    // User-defined commands from ~/.config/ppcode/commands/*.md
     if (!cmd.empty() && cmd[0] == '/') {
+        if (const commands::Command* uc =
+                commands::find(user_commands_, cmd.substr(1))) {
+            std::string prompt = uc->expand(rest);
+            if (!uc->model.empty() && uc->model != cfg_.model) {
+                cfg_.model = uc->model;
+                client_.set_model(uc->model);
+                add(Kind::Info, "model set to " + uc->model + " for /" + uc->name);
+            }
+            add(Kind::Status, "/" + uc->name + " -> " + elide(prompt, 100));
+            start_turn(prompt);
+            return true;
+        }
         add(Kind::Error, "unknown command " + cmd + " (try /help)");
         return true;
     }
@@ -1439,6 +1487,12 @@ int Tui::run() {
     mouseinterval(0);
 
     pal_.init(cfg_.color);
+
+    {
+        std::vector<std::string> cwarn;
+        user_commands_ = commands::load(&cwarn);
+        for (const std::string& w : cwarn) add(Kind::Error, w);
+    }
 
     {
         char buf[512];

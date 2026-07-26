@@ -3,6 +3,7 @@
 #include "appledocs.hpp"
 #include "builderr.hpp"
 #include "bundler.hpp"
+#include "commands.hpp"
 #include "common.hpp"
 #include "config.hpp"
 #include "envinfo.hpp"
@@ -366,6 +367,26 @@ int main(int argc, char** argv) {
     builderr::add_tools(tools);
     xib::add_tools(tools);
     bundle::add_tools(tools);
+
+    // Hooks wrap the mutating tools, so install them once every tool is
+    // registered -- including MCP and subagent tools.
+    {
+        std::string cfg_text;
+        json cfg_json = json::object();
+        if (read_file_text(cfg.config_path, &cfg_text, nullptr)) {
+            json parsed = json::parse(cfg_text, nullptr, false, true);
+            if (!parsed.is_discarded()) cfg_json = parsed;
+        }
+        std::vector<std::string> hwarn;
+        std::vector<commands::Hook> hooks = commands::load_hooks(cfg_json, &hwarn);
+        for (const std::string& w : hwarn)
+            std::fprintf(stderr, "ppcode: %s\n", w.c_str());
+        if (!hooks.empty()) {
+            commands::install_hooks(tools, hooks);
+            if (!quiet)
+                std::fprintf(stderr, "%zu hook(s) installed\n", hooks.size());
+        }
+    }
 
     // Screenshot tooling is only worth advertising if there is a screen to
     // capture. Whether the model can actually see the result changes the tool's

@@ -54,6 +54,30 @@ struct BridgeState;
 - (BOOL)isBusy;
 - (void)cancel;
 
+// API key. A GUI application launched from the Finder does not inherit the
+// shell environment, so the key usually has to come from the config file or be
+// entered in the interface.
+- (BOOL)hasApiKey;
+- (NSString *)configPath;
+- (BOOL)saveApiKey:(NSString *)key error:(NSString **)err;
+
+// Whole-config access, so the settings window does not need an accessor per
+// field. Values map JSON <-> Foundation objects.
+- (NSDictionary *)configDictionary;
+- (BOOL)saveConfigDictionary:(NSDictionary *)d error:(NSString **)err;
+- (void)reloadConfig;
+
+// Installing the command line tool. The CLI is carried inside the bundle so the
+// application can be the thing that installs and updates it.
+- (NSString *)bundledCLIPath;
+- (NSString *)cliVersionAt:(NSString *)path;
+- (BOOL)installCLIToDirectory:(NSString *)dir error:(NSString **)err;
+
+// Is a MacPorts port installed, and install one (a long build -- the caller
+// must warn).
+- (BOOL)isPortInstalled:(NSString *)port;
+- (NSString *)macportsPrefix;
+
 - (NSString *)modelId;
 - (void)setModelId:(NSString *)mid;
 - (NSArray *)availableModels;      // array of NSDictionary

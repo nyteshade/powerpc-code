@@ -25,6 +25,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <filesystem>
 #include <thread>
 
 using namespace ppcode;
@@ -364,6 +365,237 @@ struct BridgeState {
 }
 
 // ---------------------------------------------------------------------------
+
+// ---- JSON <-> Foundation -------------------------------------------------
+
+static id JsonToObjC(const ppcode::json &j);
+
+static NSArray *JsonArrayToObjC(const ppcode::json &j) {
+    NSMutableArray *a = [NSMutableArray array];
+    for (size_t i = 0; i < j.size(); i++) [a addObject:JsonToObjC(j[i])];
+    return a;
+}
+
+static id JsonToObjC(const ppcode::json &j) {
+    if (j.is_object()) {
+        NSMutableDictionary *d = [NSMutableDictionary dictionary];
+        for (auto it = j.begin(); it != j.end(); ++it)
+            [d setObject:JsonToObjC(it.value())
+                  forKey:[NSString stringWithUTF8String:it.key().c_str()]];
+        return d;
+    }
+    if (j.is_array())   return JsonArrayToObjC(j);
+    if (j.is_boolean()) return [NSNumber numberWithBool:j.get<bool>() ? YES : NO];
+    if (j.is_number_integer())
+        return [NSNumber numberWithLongLong:j.get<long long>()];
+    if (j.is_number())  return [NSNumber numberWithDouble:j.get<double>()];
+    if (j.is_string())  return Str(j.get<std::string>());
+    return [NSNull null];
+}
+
+static ppcode::json ObjCToJson(id o) {
+    if (o == nil || [o isKindOfClass:[NSNull class]]) return ppcode::json();
+    if ([o isKindOfClass:[NSDictionary class]]) {
+        ppcode::json j = ppcode::json::object();
+        NSEnumerator *e = [o keyEnumerator];
+        NSString *k;
+        while ((k = [e nextObject]) != nil)
+            j[Cpp(k)] = ObjCToJson([o objectForKey:k]);
+        return j;
+    }
+    if ([o isKindOfClass:[NSArray class]]) {
+        ppcode::json j = ppcode::json::array();
+        NSEnumerator *e = [o objectEnumerator];
+        id v;
+        while ((v = [e nextObject]) != nil) j.push_back(ObjCToJson(v));
+        return j;
+    }
+    if ([o isKindOfClass:[NSNumber class]]) {
+        const char *t = [o objCType];
+        if (t && (t[0] == 'c' || t[0] == 'B')) return ppcode::json([o boolValue] ? true : false);
+        if (t && (t[0] == 'd' || t[0] == 'f')) return ppcode::json([o doubleValue]);
+        return ppcode::json((long long)[o longLongValue]);
+    }
+    if ([o isKindOfClass:[NSString class]]) return ppcode::json(Cpp(o));
+    return ppcode::json();
+}
+
+- (NSDictionary *)configDictionary {
+    std::string text;
+    ppcode::json j = ppcode::json::object();
+    if (read_file_text(st->cfg.config_path, &text, nullptr)) {
+        ppcode::json parsed = ppcode::json::parse(text, nullptr, false, true);
+        if (!parsed.is_discarded() && parsed.is_object()) j = parsed;
+    }
+    // Surface the effective values even when the file omits them, so the
+    // settings window shows what is actually in force.
+    if (!j.contains("model"))       j["model"] = st->cfg.model;
+    if (!j.contains("max_tokens"))  j["max_tokens"] = st->cfg.max_tokens;
+    if (!j.contains("max_turns"))   j["max_turns"] = st->cfg.max_turns;
+    if (!j.contains("temperature")) j["temperature"] = st->cfg.temperature;
+    if (!j.contains("cache_mode"))  j["cache_mode"] = st->cfg.cache_mode;
+    if (!j.contains("max_cost"))    j["max_cost"] = st->cfg.max_cost;
+    if (!j.contains("yolo"))        j["yolo"] = st->cfg.yolo;
+    if (!j.contains("web_search"))  j["web_search"] = st->cfg.web_search;
+    return (NSDictionary *)JsonToObjC(j);
+}
+
+- (BOOL)saveConfigDictionary:(NSDictionary *)d error:(NSString **)err {
+    ppcode::json j = ObjCToJson(d);
+    std::error_code ec;
+    std::filesystem::path p(st->cfg.config_path);
+    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+
+    std::string werr;
+    if (!write_file_text(st->cfg.config_path, j.dump(2) + "\n", &werr)) {
+        if (err) *err = Str(werr);
+        return NO;
+    }
+    // The file holds a credential.
+    std::filesystem::permissions(
+        st->cfg.config_path,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace, ec);
+    [self reloadConfig];
+    return YES;
+}
+
+- (void)reloadConfig {
+    std::vector<std::string> warn;
+    std::string path = st->cfg.config_path;
+    st->cfg = ppcode::Config::load(path, &warn);
+    st->client->set_config(st->cfg);
+    [self rebuildSystemPrompt];
+}
+
+// ---- CLI installation ------------------------------------------------------
+
+- (NSString *)bundledCLIPath {
+    // Shipped alongside the GUI inside the bundle.
+    NSString *res = [[NSBundle mainBundle] resourcePath];
+    if (res) {
+        NSString *p = [res stringByAppendingPathComponent:@"ppcode"];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:p]) return p;
+    }
+    // Running from the build tree rather than a bundle.
+    NSString *dev = @"build/ppcode";
+    if ([[NSFileManager defaultManager] fileExistsAtPath:dev]) return dev;
+    return nil;
+}
+
+- (NSString *)cliVersionAt:(NSString *)path {
+    if (!path || ![[NSFileManager defaultManager] isExecutableFileAtPath:path])
+        return nil;
+    ppcode::CommandResult r =
+        ppcode::run_shell(Cpp(path) + " --version 2>/dev/null", ".", 10000, 4096,
+                          nullptr);
+    if (r.spawn_failed || r.exit_code != 0) return nil;
+    std::string out = trim(r.output);
+    return out.empty() ? nil : Str(out);
+}
+
+- (BOOL)installCLIToDirectory:(NSString *)dir error:(NSString **)err {
+    NSString *src = [self bundledCLIPath];
+    if (!src) {
+        if (err) *err = @"The command line tool was not found inside the application.";
+        return NO;
+    }
+    std::string d = Cpp(dir);
+    std::string s = Cpp(src);
+    std::string dest = d + "/ppcode";
+
+    std::error_code ec;
+    std::filesystem::create_directories(d, ec);
+
+    // Copy to a temporary name and rename, so replacing a copy that is
+    // currently running does not fail with ETXTBSY.
+    std::string tmp = dest + ".new";
+    std::filesystem::copy_file(s, tmp,
+                               std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) {
+        if (err)
+            *err = [NSString stringWithFormat:@"Could not write to %@: %s",
+                              dir, ec.message().c_str()];
+        return NO;
+    }
+    std::filesystem::permissions(tmp,
+        std::filesystem::perms::owner_all | std::filesystem::perms::group_read |
+        std::filesystem::perms::group_exec | std::filesystem::perms::others_read |
+        std::filesystem::perms::others_exec,
+        std::filesystem::perm_options::replace, ec);
+    std::filesystem::rename(tmp, dest, ec);
+    if (ec) {
+        std::filesystem::remove(tmp, ec);
+        if (err) *err = @"Could not replace the existing command line tool.";
+        return NO;
+    }
+    return YES;
+}
+
+- (NSString *)macportsPrefix {
+    for (const char *p : {"/opt/local", "/usr/local"}) {
+        std::string probe = std::string(p) + "/bin/port";
+        std::error_code ec;
+        if (std::filesystem::exists(probe, ec)) return [NSString stringWithUTF8String:p];
+    }
+    return nil;
+}
+
+- (BOOL)isPortInstalled:(NSString *)port {
+    NSString *prefix = [self macportsPrefix];
+    if (!prefix) return NO;
+    std::string cmd = Cpp(prefix) + "/bin/port -q installed " + Cpp(port) +
+                      " 2>/dev/null";
+    ppcode::CommandResult r = ppcode::run_shell(cmd, ".", 20000, 16384, nullptr);
+    return (!r.spawn_failed && !trim(r.output).empty()) ? YES : NO;
+}
+
+- (BOOL)hasApiKey { return st->cfg.api_key.empty() ? NO : YES; }
+- (NSString *)configPath { return Str(st->cfg.config_path); }
+
+- (BOOL)saveApiKey:(NSString *)key error:(NSString **)err {
+    std::string k = trim(Cpp(key));
+    if (k.empty()) {
+        if (err) *err = @"The key is empty.";
+        return NO;
+    }
+    // A weak sanity check, so a pasted URL or a stray word is caught here
+    // rather than as an opaque 401 later.
+    if (k.size() < 20 || k.find(' ') != std::string::npos) {
+        if (err) *err = @"That does not look like an OpenRouter key. They start "
+                         "with sk-or- and contain no spaces.";
+        return NO;
+    }
+
+    st->cfg.api_key = k;
+    st->client->set_api_key(k);
+
+    // Persist it. Config::save deliberately omits the key, so write it here and
+    // tighten the permissions -- this is a credential.
+    std::string path = st->cfg.config_path;
+    json j = json::object();
+    std::string existing;
+    if (read_file_text(path, &existing, nullptr)) {
+        json parsed = json::parse(existing, nullptr, false, true);
+        if (!parsed.is_discarded() && parsed.is_object()) j = parsed;
+    }
+    j["api_key"] = k;
+    j["model"] = st->cfg.model;
+
+    std::error_code ec;
+    std::filesystem::path p(path);
+    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+
+    std::string werr;
+    if (!write_file_text(path, j.dump(2) + "\n", &werr)) {
+        if (err) *err = Str(werr);
+        return NO;
+    }
+    std::filesystem::permissions(
+        path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace, ec);
+    return YES;
+}
 
 - (NSString *)modelId { return Str(st->cfg.model); }
 

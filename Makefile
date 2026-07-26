@@ -86,10 +86,13 @@ $(GUI_BIN): $(CORE_OBJS) $(GUI_OBJS)
 
 # A real application bundle, so it can be double-clicked and appears in the Dock
 # with a name rather than as a bare executable.
-$(APP): $(GUI_BIN)
+# The application carries the command line tool inside it, so the GUI can be the
+# thing that installs and updates the CLI.
+$(APP): $(GUI_BIN) $(BIN)
 	@rm -rf $(APP)
 	@mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	@cp $(GUI_BIN) $(APP)/Contents/MacOS/ppcode
+	@cp $(BIN) $(APP)/Contents/Resources/ppcode
 	@printf '%s' 'APPL????' > $(APP)/Contents/PkgInfo
 	@printf '%s\n' \
 	  '<?xml version="1.0" encoding="UTF-8"?>' \
