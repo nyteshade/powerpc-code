@@ -272,6 +272,51 @@ struct Editor {
 // Model picker overlay
 // ---------------------------------------------------------------------------
 
+
+// The built-in slash commands, in one place.
+//
+// /help used to carry its own copy of this list, which is how a command gets
+// added and stays undocumented. Both the help text and the completion picker
+// are generated from here, so they cannot disagree.
+struct SlashCommand {
+    const char* name;
+    const char* args;
+    const char* help;
+};
+
+const SlashCommand kSlashCommands[] = {
+    {"model",    "[id]",    "open the model picker, or set a model directly"},
+    {"models",   "[sub]",   "list models matching a substring"},
+    {"tools",    "",        "list available tools"},
+    {"mcp",      "",        "show connected MCP servers"},
+    {"env",      "[level]", "show machine context, or set the detail level"},
+    {"term",     "",        "report what this terminal negotiated"},
+    {"index",    "",        "index conversations and notes for search"},
+    {"search",   "TEXT",    "search everything indexed"},
+    {"jobs",     "",        "list background jobs"},
+    {"todo",     "",        "show the current plan"},
+    {"cwd",      "[dir]",   "show or change the working directory"},
+    {"yolo",     "",        "toggle approving every tool automatically"},
+    {"unicode",  "",        "toggle box-drawing and typographic characters"},
+    {"clear",    "",        "start a fresh conversation"},
+    {"undo",     "[n]",     "revert the last n file changes (default 1)"},
+    {"changes",  "",        "list files changed this session"},
+    {"compact",  "",        "summarise the conversation to free up context"},
+    {"sessions", "",        "list saved sessions"},
+    {"save",     "PATH",    "write this session to a file"},
+    {"load",     "PATH",    "restore a session"},
+    {"cost",     "",        "show token and cost totals"},
+    {"quit",     "",        "exit"},
+};
+
+// A command being completed: the same shape as the model picker, so the keys
+// behave the same way.
+struct CommandMatch {
+    std::string name;
+    std::string args;
+    std::string help;
+};
+
 struct Picker {
     bool active = false;
     std::string query;
@@ -306,6 +351,11 @@ private:
     // What ncurses actually granted, which is not always what was requested.
     mmask_t mouse_mask_ = 0;
     Picker picker_;
+
+    // Slash-command completion, shown while a command is being typed.
+    std::vector<CommandMatch> completions_;
+    size_t completion_selected_ = 0;
+    bool completions_active_ = false;
     ModelCatalog catalog_;
     std::vector<commands::Command> user_commands_;
     JobManager jobs_;
@@ -344,6 +394,13 @@ private:
     void handle_key(int ch);
     bool handle_mouse();
     void handle_picker_key(int ch);
+    void refresh_completions();
+    bool handle_completion_key(int ch);
+    void draw_completions(int top, int width);
+    void apply_completion();
+    // The command token at the start of the input, or empty. Used both to
+    // colour it and to decide whether completion applies.
+    std::string current_command_token(bool* recognised) const;
     void open_picker(const std::string& initial);
     void refresh_picker();
     void submit();
@@ -592,14 +649,194 @@ void Tui::draw_input(int top, int height, int width) {
         mvaddstr(top + r, 0, idx == 0 ? prompt.c_str()
                                       : std::string(pw, ' ').c_str());
         attroff(a);
-        mvaddstr(top + r, static_cast<int>(pw),
-                 utf8::truncate_to_width(lines[idx],
-                                         static_cast<size_t>(avail)).c_str());
+
+        std::string shown = utf8::truncate_to_width(
+            lines[idx], static_cast<size_t>(avail));
+
+        // A slash command is coloured so it is obvious the line will be
+        // intercepted rather than sent to the model -- and coloured
+        // differently when it is not a command anyone knows, which is the
+        // cheapest possible way to catch a typo before pressing Enter.
+        bool recognised = false;
+        std::string token = (idx == 0) ? current_command_token(&recognised) : "";
+
+        if (!token.empty()) {
+            std::string head = "/" + token;
+            if (utf8::width(head) <= utf8::width(shown)) {
+                int ca = pal_.attr(recognised ? render::Style::ListMarker
+                                              : render::Style::ErrorText);
+                attron(ca);
+                mvaddstr(top + r, static_cast<int>(pw), head.c_str());
+                attroff(ca);
+                mvaddstr(top + r, static_cast<int>(pw + utf8::width(head)),
+                         shown.substr(head.size()).c_str());
+                continue;
+            }
+        }
+
+        mvaddstr(top + r, static_cast<int>(pw), shown.c_str());
     }
 
     int scr_row = top + (cur_row - first);
     if (scr_row >= top && scr_row < top + height)
         move(scr_row, std::min<int>(static_cast<int>(pw) + cur_col, width - 1));
+}
+
+
+// ---------------------------------------------------------------------------
+// Slash-command completion
+// ---------------------------------------------------------------------------
+
+std::string Tui::current_command_token(bool* recognised) const {
+    if (recognised) *recognised = false;
+
+    // Only the first line, and only when the input opens with a slash: a slash
+    // anywhere else is ordinary text and should not light up.
+    const std::string& t = ed_.text;
+    if (t.empty() || t[0] != '/') return "";
+
+    size_t end = t.find_first_of(" \n");
+    std::string token = t.substr(1, end == std::string::npos ? std::string::npos
+                                                            : end - 1);
+    if (token.empty()) return "";
+
+    if (recognised) {
+        for (const SlashCommand& c : kSlashCommands)
+            if (token == c.name) { *recognised = true; break; }
+
+        if (!*recognised)
+            for (const commands::Command& c : user_commands_)
+                if (token == c.name) { *recognised = true; break; }
+    }
+
+    return token;
+}
+
+void Tui::refresh_completions() {
+    completions_.clear();
+
+    const std::string& t = ed_.text;
+    // Completion applies while the command word is still being typed: once a
+    // space is there the user has moved on to arguments.
+    bool typing_command = !t.empty() && t[0] == '/' &&
+                          t.find_first_of(" \n") == std::string::npos;
+    if (!typing_command) {
+        completions_active_ = false;
+        return;
+    }
+
+    std::string prefix = to_lower(t.substr(1));
+
+    for (const SlashCommand& c : kSlashCommands) {
+        if (!prefix.empty() && to_lower(std::string(c.name)).find(prefix) != 0)
+            continue;
+        CommandMatch m;
+        m.name = c.name;
+        m.args = c.args;
+        m.help = c.help;
+        completions_.push_back(m);
+    }
+
+    // User commands after the built-ins, since a built-in is what someone
+    // typing a familiar name expects to get.
+    for (const commands::Command& c : user_commands_) {
+        if (!prefix.empty() && to_lower(c.name).find(prefix) != 0) continue;
+        CommandMatch m;
+        m.name = c.name;
+        m.help = c.description.empty() ? "your command" : c.description;
+        completions_.push_back(m);
+    }
+
+    if (completion_selected_ >= completions_.size()) completion_selected_ = 0;
+    completions_active_ = !completions_.empty();
+}
+
+void Tui::apply_completion() {
+    if (!completions_active_ || completion_selected_ >= completions_.size()) return;
+
+    const CommandMatch& m = completions_[completion_selected_];
+    // A trailing space when the command takes arguments, so typing continues
+    // where it should; none when it does not, so Enter sends immediately.
+    ed_.text = "/" + m.name + (m.args.empty() ? "" : " ");
+    ed_.cursor = ed_.text.size();
+    completions_active_ = false;
+    needs_redraw_ = true;
+}
+
+// Returns true when the key was consumed by the completion list.
+bool Tui::handle_completion_key(int ch) {
+    if (!completions_active_) return false;
+
+    switch (ch) {
+        case 27:                        // Esc dismisses without completing
+            completions_active_ = false;
+            needs_redraw_ = true;
+            return true;
+
+        case '\t':
+            apply_completion();
+            return true;
+
+        case KEY_UP:
+            if (completion_selected_ > 0) completion_selected_--;
+            needs_redraw_ = true;
+            return true;
+
+        case KEY_DOWN:
+            if (completion_selected_ + 1 < completions_.size())
+                completion_selected_++;
+            needs_redraw_ = true;
+            return true;
+
+        // Enter completes rather than sending, so the highlighted entry is what
+        // runs. A second Enter then sends it, which is what the model picker
+        // does too.
+        case '\r':
+        case KEY_ENTER:
+            apply_completion();
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+void Tui::draw_completions(int top, int width) {
+    if (!completions_active_ || completions_.empty()) return;
+
+    int rows = static_cast<int>(std::min<size_t>(completions_.size(), 8));
+    int box_top = top - rows;
+    if (box_top < 1) { box_top = 1; rows = top - 1; }
+    if (rows <= 0) return;
+
+    // Keep the selection in view when the list is longer than the box.
+    size_t first = 0;
+    if (completion_selected_ >= static_cast<size_t>(rows))
+        first = completion_selected_ - static_cast<size_t>(rows) + 1;
+
+    for (int r = 0; r < rows; r++) {
+        size_t idx = first + static_cast<size_t>(r);
+        if (idx >= completions_.size()) break;
+
+        const CommandMatch& m = completions_[idx];
+        bool sel = (idx == completion_selected_);
+
+        move(box_top + r, 0);
+        clrtoeol();
+
+        int a = sel ? pal_.attr(render::Style::Bar)
+                    : pal_.attr(render::Style::Dim);
+        attron(a);
+
+        std::string line = "  /" + m.name;
+        if (!m.args.empty()) line += " " + m.args;
+        while (utf8::width(line) < 22) line += " ";
+        line += m.help;
+
+        mvaddstr(box_top + r, 0,
+                 utf8::truncate_to_width(line, static_cast<size_t>(width)).c_str());
+        attroff(a);
+    }
 }
 
 void Tui::draw_picker(int width, int height) {
@@ -735,6 +972,7 @@ void Tui::draw() {
     draw_transcript(0, trans_h, w);
     draw_status(trans_h, w);
     draw_input(trans_h + status_rows, in_rows, w);
+    draw_completions(trans_h + status_rows, w);
 
     if (picker_.active) {
         draw_picker(w, h);
@@ -988,31 +1226,17 @@ bool Tui::handle_slash(const std::string& line) {
                      (c.description.empty() ? c.source_path : c.description) + "\n";
         if (!extra.empty()) extra = "\nYour commands:\n" + extra;
 
+        std::string list;
+        for (const SlashCommand& c : kSlashCommands) {
+            std::string left = "  /" + std::string(c.name);
+            if (*c.args) left += " " + std::string(c.args);
+            while (utf8::width(left) < 18) left += " ";
+            list += left + c.help + "\n";
+        }
+
         add(Kind::Info,
+            "Commands:\n" + list +
             std::string(
-            "Commands:\n"
-            "  /model [id]     open the model picker, or set a model directly\n"
-            "  /models [sub]   list models matching a substring\n"
-            "  /tools          list available tools\n"
-            "  /mcp            show connected MCP servers\n"
-            "  /env [level]    show machine context, or set the detail level\n"
-            "  /term           report what this terminal negotiated\n"
-            "  /index          index conversations and notes for search\n"
-            "  /search TEXT    search everything indexed\n"
-            "  /jobs           list background jobs\n"
-            "  /todo           show the current plan\n"
-            "  /cwd [dir]      show or change the working directory\n"
-            "  /yolo           toggle approving every tool automatically\n"
-            "  /unicode        toggle box-drawing and typographic characters\n"
-            "  /clear          start a fresh conversation\n"
-            "  /undo [n]       revert the last n file changes (default 1)\n"
-            "  /changes        list files changed this session\n"
-            "  /compact        summarise the conversation to free up context\n"
-            "  /sessions       list saved sessions\n"
-            "  /save PATH      write this session to a file\n"
-            "  /load PATH      restore a session\n"
-            "  /cost           show token and cost totals\n"
-            "  /quit           exit\n"
             "\n"
             "Keys:\n"
             "  Enter send. While the model is working, Enter queues a steering\n"
@@ -1022,7 +1246,9 @@ bool Tui::handle_slash(const std::string& line) {
             "  PgUp/PgDn scroll, Shift+Up/Down scroll a line, Home/End of input\n"
             "  Ctrl+Home top of transcript, Ctrl+End live tail\n"
             "  Mouse wheel scrolls the transcript\n"
-            "  Up/Down recall previous inputs, Ctrl+W delete a word") + extra);
+            "  Up/Down recall previous inputs, Ctrl+W delete a word\n"
+            "  Type / to complete a command: Up/Down choose, Tab or Enter fills "
+            "it in") + extra);
         return true;
     }
     if (cmd == "/quit" || cmd == "/exit") { quit_.store(true); return true; }
@@ -1674,11 +1900,16 @@ int Tui::run() {
         while (ch != ERR) {
             if (picker_.active) {
                 handle_picker_key(ch);
+            } else if (handle_completion_key(ch)) {
+                // Consumed by the command completion list.
             } else if (ch == 10 && !busy_.load()) {
                 // Ctrl+J inserts a newline; Return arrives as 13 thanks to nonl().
                 ed_.insert("\n");
             } else {
                 handle_key(ch);
+                // The list follows whatever the edit just became, so it opens
+                // on "/", narrows as more is typed, and closes on a space.
+                refresh_completions();
             }
             // Any consumed key can change what is on screen. Requesting the
             // redraw here rather than in each handler is what keeps editing

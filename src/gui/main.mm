@@ -330,6 +330,13 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 
 @end
 
+// Declared because -initWithFrame: uses it before it is defined.
+@interface PPDropWell (Private)
+
+- (void)setLabelText:(NSString *)text;
+
+@end
+
 @implementation PPDropWell
 
 - (id)initWithFrame:(NSRect)frame {
@@ -348,8 +355,8 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
     [label setTextColor:[NSColor colorWithCalibratedWhite:0.78 alpha:1.0]];
     [[label cell] setWraps:YES];
     [label setAutoresizingMask:NSViewWidthSizable];
-    [label setStringValue:PPUTF8("Drop documents here,\nor click to choose")];
     [self addSubview:label];
+    [self setLabelText:PPUTF8("Drop documents here,\nor click to choose")];
 
     bar = [[[NSProgressIndicator alloc]
         initWithFrame:NSMakeRect(14, 44, NSWidth(frame) - 28, 12)] autorelease];
@@ -368,6 +375,31 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 
 - (void)setDropTarget:(id)t { target = t; }
 
+// Light type sitting straight on the hide needs a shadow under it or it reads
+// as thin and washed out against the grain.
+- (void)setLabelText:(NSString *)text {
+  NSShadow *shadow = [[[NSShadow alloc] init] autorelease];
+  [shadow setShadowColor:[NSColor colorWithCalibratedWhite:0.0 alpha:0.9]];
+  [shadow setShadowOffset:NSMakeSize(0.0, -1.0)];
+  [shadow setShadowBlurRadius:2.5];
+
+  NSMutableParagraphStyle *p =
+      [[[NSMutableParagraphStyle alloc] init] autorelease];
+  [p setAlignment:NSCenterTextAlignment];
+
+  NSDictionary *attrs = [NSDictionary dictionaryWithObjectsAndKeys:
+      [NSFont systemFontOfSize:10.0], NSFontAttributeName,
+      [NSColor colorWithCalibratedWhite:0.88 alpha:1.0],
+          NSForegroundColorAttributeName,
+      shadow, NSShadowAttributeName,
+      p, NSParagraphStyleAttributeName,
+      nil];
+
+  [label setAttributedStringValue:
+      [[[NSAttributedString alloc] initWithString:(text ? text : @"")
+                                       attributes:attrs] autorelease]];
+}
+
 - (void)beginBusyWithMessage:(NSString *)message {
   busy = YES;
   hovering = NO;
@@ -376,7 +408,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   // looks like nothing is happening.
   [bar setIndeterminate:YES];
   [bar startAnimation:nil];
-  [label setStringValue:message ? message : @"Indexing..."];
+  [self setLabelText:message ? message : @"Indexing..."];
   [self setNeedsDisplay:YES];
 }
 
@@ -388,14 +420,14 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
     [bar setDoubleValue:fraction];
   }
 
-  if ([message length]) { [label setStringValue:message]; }
+  if ([message length]) { [self setLabelText:message]; }
 }
 
 - (void)endBusy {
   busy = NO;
   [bar stopAnimation:nil];
   [bar setHidden:YES];
-  [label setStringValue:PPUTF8("Drop documents here,\nor click to choose")];
+  [self setLabelText:PPUTF8("Drop documents here,\nor click to choose")];
   [self setNeedsDisplay:YES];
 }
 
