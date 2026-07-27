@@ -103,6 +103,7 @@ $(APP): $(GUI_BIN) $(BIN)
 	@mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	@cp $(GUI_BIN) $(APP)/Contents/MacOS/ppcode
 	@cp $(BIN) $(APP)/Contents/Resources/ppcode
+	@cp resources/ppcode.icns $(APP)/Contents/Resources/ppcode.icns
 	@printf '%s' 'APPL????' > $(APP)/Contents/PkgInfo
 	@printf '%s\n' \
 	  '<?xml version="1.0" encoding="UTF-8"?>' \
@@ -111,6 +112,7 @@ $(APP): $(GUI_BIN) $(BIN)
 	  '  <key>CFBundleName</key><string>ppcode</string>' \
 	  '  <key>CFBundleDisplayName</key><string>ppcode</string>' \
 	  '  <key>CFBundleExecutable</key><string>ppcode</string>' \
+	  '  <key>CFBundleIconFile</key><string>ppcode</string>' \
 	  '  <key>CFBundleIdentifier</key><string>me.nyteshade.ppcode</string>' \
 	  '  <key>CFBundleVersion</key><string>$(VERSION)$(if $(BUILD_REV),+g$(BUILD_REV),)</string>' \
 	  '  <key>CFBundleShortVersionString</key><string>$(VERSION)</string>' \
