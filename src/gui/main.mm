@@ -461,10 +461,24 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 
 // The header band: leather with the name blocked into it, the way a title is
 // stamped on a cover.
-@interface PPTitleView : PPLeatherView
+@interface PPTitleView : PPLeatherView {
+  NSString *subtitle;
+}
+
+- (void)setSubtitle:(NSString *)s;
+
 @end
 
 @implementation PPTitleView
+
+- (void)setSubtitle:(NSString *)s {
+  [s retain];
+  [subtitle release];
+  subtitle = s;
+  [self setNeedsDisplay:YES];
+}
+
+- (void)dealloc { [subtitle release]; [super dealloc]; }
 
 - (void)drawRect:(NSRect)dirty {
   [super drawRect:dirty];
@@ -490,6 +504,32 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
                                                      green:0.73
                                                       blue:0.46
                                                      alpha:1.0]];
+
+  // The working directory rides along the right of the band, blocked into the
+  // hide like the title. It replaced a wide Aqua capsule in the bottom strip,
+  // which sat under the drop well at almost the same width and read as
+  // belonging to it -- and put a bright white bar across the leather.
+  if ([subtitle length]) {
+    NSMutableParagraphStyle *ps =
+        [[[NSMutableParagraphStyle alloc] init] autorelease];
+    [ps setAlignment:NSRightTextAlignment];
+    [ps setLineBreakMode:NSLineBreakByTruncatingHead];
+
+    NSDictionary *shade = [NSDictionary dictionaryWithObjectsAndKeys:
+        [NSFont systemFontOfSize:10.0], NSFontAttributeName,
+        [NSColor colorWithCalibratedWhite:0.0 alpha:0.55],
+            NSForegroundColorAttributeName,
+        ps, NSParagraphStyleAttributeName, nil];
+    NSDictionary *face = [NSDictionary dictionaryWithObjectsAndKeys:
+        [NSFont systemFontOfSize:10.0], NSFontAttributeName,
+        [NSColor colorWithCalibratedRed:0.72 green:0.63 blue:0.45 alpha:1.0],
+            NSForegroundColorAttributeName,
+        ps, NSParagraphStyleAttributeName, nil];
+
+    NSRect r = NSMakeRect(NSMaxX(b) - 320.0, NSMinY(b) + 12.0, 300.0, 14.0);
+    [subtitle drawInRect:NSOffsetRect(r, 0, -1) withAttributes:shade];
+    [subtitle drawInRect:r withAttributes:face];
+  }
 }
 
 @end
@@ -508,8 +548,8 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   NSTableView *sessionTable;
   NSArray *sessions;
   NSTextField *statusField;
-  NSButton *cwdButton;
   PPDropWell *dropWell;
+  PPTitleView *headerView;
   // The attachment strip, and the pieces whose frames it pushes around when it
   // appears and disappears.
   PPTokenRow *attachRow;
@@ -784,6 +824,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [header setDark:YES];
   [header setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
   [content addSubview:header];
+  headerView = header;
 
   // --- left: session list -------------------------------------------------
   NSScrollView *listScroll =
@@ -934,22 +975,8 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [content addSubview:mainSplit];
 
   // --- bottom bar ---------------------------------------------------------
-  // Which directory the tools will act in. It belongs on screen rather than
-  // buried in a menu: it is the answer to "where is this about to write?", and
-  // it is the scope every permission grant is measured against.
-  cwdButton = [[[NSButton alloc]
-      initWithFrame:NSMakeRect(kMargin, ctlY, 260, ctlH)] autorelease];
-  [cwdButton setBezelStyle:NSRoundedBezelStyle];
-  [cwdButton setFont:[NSFont systemFontOfSize:11.0]];
-  [cwdButton setImage:[[NSWorkspace sharedWorkspace]
-                          iconForFile:NSHomeDirectory()]];
-  [cwdButton setImagePosition:NSImageLeft];
-  [cwdButton setTarget:self];
-  [cwdButton setAction:@selector(chooseWorkingDirectory:)];
-  [content addSubview:cwdButton];
-
   statusField = [[[NSTextField alloc]
-      initWithFrame:NSMakeRect(kMargin + 268, kSeamClear + 4, 300, 18)]
+      initWithFrame:NSMakeRect(kMargin, kSeamClear + 4, 560, 18)]
                     autorelease];
   [statusField setBezeled:NO];
   [statusField setDrawsBackground:NO];
@@ -1271,9 +1298,11 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
                 [parts lastObject]];
   }
 
-  [cwdButton setTitle:shown];
-  [cwdButton setToolTip:
-      [NSString stringWithFormat:@"Working directory: %@\nClick to change.", dir]];
+  [headerView setSubtitle:shown];
+
+  // The proxy icon in the title bar, which is where a Mac application has
+  // always said what it is pointed at -- and it is command-clickable.
+  [window setRepresentedFilename:dir];
 }
 
 - (void)chooseWorkingDirectory:(id)sender {
@@ -1718,6 +1747,10 @@ static void buildMenuBar(id target) {
   [[fileMenu addItemWithTitle:@"New Conversation"
                        action:@selector(newConversation:)
                 keyEquivalent:@"n"] setTarget:target];
+  [fileMenu addItem:[NSMenuItem separatorItem]];
+  [[fileMenu addItemWithTitle:PPUTF8("Working Directory\xE2\x80\xA6")
+                       action:@selector(chooseWorkingDirectory:)
+                keyEquivalent:@"d"] setTarget:target];
   [fileMenu addItem:[NSMenuItem separatorItem]];
   [[fileMenu addItemWithTitle:PPUTF8("Export Conversation as JSONL\xE2\x80\xA6")
                        action:@selector(exportSession:)
