@@ -501,6 +501,45 @@ std::vector<Hit> Store::search(const std::string& query,
     return out;
 }
 
+std::vector<Store::Document> Store::list_documents(
+    const std::string& collection) const {
+    std::vector<Document> out;
+    if (!impl_->db) return out;
+
+    // Counting embedded chunks needs a join against the vector table, which
+    // only exists once something has been embedded.
+    bool have_vec = impl_->vec_ok && impl_->embed_dim > 0;
+
+    std::string sql =
+        "select d.doc_id, d.collection, d.updated_at, count(c.chunk_id) ";
+    if (have_vec)
+        sql += ", (select count(*) from chunks_vec v "
+               "   join chunks cc on cc.chunk_id = v.chunk_id "
+               "   where cc.doc_id = d.doc_id) ";
+    else
+        sql += ", 0 ";
+    sql += "from docs d left join chunks c on c.doc_id = d.doc_id ";
+    if (!collection.empty()) sql += "where d.collection = ? ";
+    sql += "group by d.doc_id order by d.collection, d.doc_id";
+
+    Stmt st;
+    if (!st.prepare(impl_->db, sql)) return out;
+    if (!collection.empty())
+        sqlite3_bind_text(st.get(), 1, collection.c_str(), -1, SQLITE_TRANSIENT);
+
+    while (sqlite3_step(st.get()) == SQLITE_ROW) {
+        Document d;
+        d.doc_id = column_text(st.get(), 0);
+        d.collection = column_text(st.get(), 1);
+        d.updated_at = sqlite3_column_int64(st.get(), 2);
+        d.chunks = sqlite3_column_int64(st.get(), 3);
+        d.embedded = sqlite3_column_int64(st.get(), 4);
+        out.push_back(d);
+    }
+
+    return out;
+}
+
 bool Store::stats(int64_t* chunks, int64_t* embedded, std::string* error) const {
     if (chunks) *chunks = 0;
     if (embedded) *embedded = 0;

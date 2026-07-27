@@ -131,3 +131,42 @@ struct BridgeState;
 - (double)totalCost;
 
 @end
+
+// --- the search index -------------------------------------------------------
+//
+// Indexing runs on its own thread: a book is thousands of chunks and doing that
+// on the main thread would freeze the window for as long as it took. Progress
+// arrives on the main thread through the delegate methods below.
+
+@protocol PPIndexDelegate
+- (void)indexDidProgress:(NSString *)message fraction:(double)fraction;
+- (void)indexDidFinish:(NSString *)summary added:(NSInteger)documents;
+@end
+
+@interface PPBridge (Index)
+
+// Index files or folders into a collection. Returns NO if indexing is already
+// running -- one at a time, since they share one database.
+- (BOOL)indexPaths:(NSArray *)paths
+    intoCollection:(NSString *)collection
+          delegate:(id)indexDelegate;
+
+- (BOOL)isIndexing;
+
+// Rebuild the conversation half from the session files.
+- (BOOL)reindexConversationsWithDelegate:(id)indexDelegate;
+
+// Everything in the index: dictionaries with docId, collection, chunks,
+// embedded, age, and a displayName suitable for a table.
+- (NSArray *)indexedDocuments;
+
+// Total chunks and how many carry an embedding.
+- (NSDictionary *)indexStatistics;
+
+- (BOOL)removeIndexedDocument:(NSString *)docId;
+
+// Empty the whole index. The conversations themselves are untouched -- this is
+// derived data and can always be rebuilt.
+- (BOOL)clearIndex;
+
+@end

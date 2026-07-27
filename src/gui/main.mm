@@ -12,6 +12,7 @@
 #import <Cocoa/Cocoa.h>
 
 #import "GuiBridge.h"
+#import "Library.h"
 #import "Markdown.h"
 #import "Settings.h"
 #import "Skin.h"
@@ -308,6 +309,147 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 
 @end
 
+// Where documents are added to the search index.
+//
+// A drop target rather than a button, because the thing being added is a file
+// and dragging it is the shortest path from "I have this book" to "it is
+// searchable". It shows a progress bar in place while indexing, since the work
+// takes long enough on this hardware that silence would read as a hang.
+@interface PPDropWell : NSView {
+  id target;
+  NSProgressIndicator *bar;
+  NSTextField *label;
+  BOOL hovering;
+  BOOL busy;
+}
+
+- (void)setDropTarget:(id)t;
+- (void)beginBusyWithMessage:(NSString *)message;
+- (void)setBusyMessage:(NSString *)message fraction:(double)fraction;
+- (void)endBusy;
+
+@end
+
+@implementation PPDropWell
+
+- (id)initWithFrame:(NSRect)frame {
+  if ((self = [super initWithFrame:frame])) {
+    [self registerForDraggedTypes:
+        [NSArray arrayWithObject:NSFilenamesPboardType]];
+
+    label = [[[NSTextField alloc]
+        initWithFrame:NSMakeRect(8, 10, NSWidth(frame) - 16, 32)] autorelease];
+    [label setBezeled:NO];
+    [label setDrawsBackground:NO];
+    [label setEditable:NO];
+    [label setSelectable:NO];
+    [label setAlignment:NSCenterTextAlignment];
+    [label setFont:[NSFont systemFontOfSize:10.0]];
+    [label setTextColor:[NSColor colorWithCalibratedWhite:0.78 alpha:1.0]];
+    [[label cell] setWraps:YES];
+    [label setAutoresizingMask:NSViewWidthSizable];
+    [label setStringValue:PPUTF8("Drop documents here\nto add them to search")];
+    [self addSubview:label];
+
+    bar = [[[NSProgressIndicator alloc]
+        initWithFrame:NSMakeRect(14, 44, NSWidth(frame) - 28, 12)] autorelease];
+    [bar setStyle:NSProgressIndicatorBarStyle];
+    [bar setControlSize:NSSmallControlSize];
+    [bar setIndeterminate:NO];
+    [bar setMinValue:0.0];
+    [bar setMaxValue:1.0];
+    [bar setAutoresizingMask:NSViewWidthSizable];
+    [bar setHidden:YES];
+    [self addSubview:bar];
+  }
+
+  return self;
+}
+
+- (void)setDropTarget:(id)t { target = t; }
+
+- (void)beginBusyWithMessage:(NSString *)message {
+  busy = YES;
+  hovering = NO;
+  [bar setHidden:NO];
+  // Indeterminate until the first real fraction arrives: a bar sitting at zero
+  // looks like nothing is happening.
+  [bar setIndeterminate:YES];
+  [bar startAnimation:nil];
+  [label setStringValue:message ? message : @"Indexing..."];
+  [self setNeedsDisplay:YES];
+}
+
+- (void)setBusyMessage:(NSString *)message fraction:(double)fraction {
+  if (!busy) { [self beginBusyWithMessage:message]; }
+
+  if (fraction >= 0.0) {
+    [bar setIndeterminate:NO];
+    [bar setDoubleValue:fraction];
+  }
+
+  if ([message length]) { [label setStringValue:message]; }
+}
+
+- (void)endBusy {
+  busy = NO;
+  [bar stopAnimation:nil];
+  [bar setHidden:YES];
+  [label setStringValue:PPUTF8("Drop documents here\nto add them to search")];
+  [self setNeedsDisplay:YES];
+}
+
+- (void)drawRect:(NSRect)dirty {
+  (void)dirty;
+  NSRect b = [self bounds];
+  [PPSkin drawRecessedWellInRect:b radius:5.0];
+
+  if (busy) { return; }
+
+  // A dashed outline says "put something here" without needing a label to say
+  // so twice. It brightens while a drag is over the view.
+  NSBezierPath *p = [PPSkin roundedRectPath:NSInsetRect(b, 7.0, 7.0) radius:4.0];
+  CGFloat pattern[2] = {4.0, 3.0};
+  [p setLineDash:pattern count:2 phase:0.0];
+  [p setLineWidth:1.0];
+  [[NSColor colorWithCalibratedWhite:1.0 alpha:hovering ? 0.55 : 0.22] set];
+  [p stroke];
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+  if (busy) return NSDragOperationNone;
+
+  NSPasteboard *pb = [sender draggingPasteboard];
+  if (![[pb types] containsObject:NSFilenamesPboardType])
+      return NSDragOperationNone;
+
+  hovering = YES;
+  [self setNeedsDisplay:YES];
+
+  return NSDragOperationCopy;
+}
+
+- (void)draggingExited:(id<NSDraggingInfo>)sender {
+  hovering = NO;
+  [self setNeedsDisplay:YES];
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+  hovering = NO;
+  [self setNeedsDisplay:YES];
+  if (busy) return NO;
+
+  NSArray *files =
+      [[sender draggingPasteboard] propertyListForType:NSFilenamesPboardType];
+  if ([files count] == 0) return NO;
+
+  [target performSelector:@selector(indexDroppedFiles:) withObject:files];
+
+  return YES;
+}
+
+@end
+
 // The header band: leather with the name blocked into it, the way a title is
 // stamped on a cover.
 @interface PPTitleView : PPLeatherView
@@ -358,6 +500,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   NSArray *sessions;
   NSTextField *statusField;
   NSButton *cwdButton;
+  PPDropWell *dropWell;
   // The attachment strip, and the pieces whose frames it pushes around when it
   // appears and disappears.
   PPTokenRow *attachRow;
@@ -368,6 +511,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   NSButton *sendButton;
   PPBridge *bridge;
   PPSettingsController *settings;
+  PPLibraryController *library;
   BOOL streaming;
 
   // Streaming markdown. mdBuffer holds the part of the reply whose block has
@@ -385,6 +529,9 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 - (void)deleteSession:(id)sender;
 - (void)clearAllConversations:(id)sender;
 - (void)chooseWorkingDirectory:(id)sender;
+- (void)indexDroppedFiles:(NSArray *)paths;
+- (void)showLibrary:(id)sender;
+- (void)reindexConversations:(id)sender;
 - (void)refreshWorkingDirectory;
 - (void)afterRemovingSessionWasLoaded:(BOOL)wasLoaded message:(NSString *)message;
 - (void)presentProblem:(NSString *)text detail:(NSString *)detail;
@@ -751,11 +898,27 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [mainSplit setVertical:YES];
   [mainSplit setDividerStyle:NSSplitViewDividerStyleThin];
 
-  PPWellView *listWell =
-      WrapInPaperWell(listScroll, NSMakeRect(0, 0, 220, 580),
-                      NSViewHeightSizable, NO);
+  const CGFloat kDropH = 74.0;
 
-  [mainSplit addSubview:listWell];
+  NSView *leftColumn = [[[NSView alloc]
+      initWithFrame:NSMakeRect(0, 0, 220, splitHeight)] autorelease];
+  [leftColumn setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+  PPWellView *listWell =
+      WrapInPaperWell(listScroll,
+                      NSMakeRect(0, kDropH + 6, 220, splitHeight - kDropH - 6),
+                      NSViewWidthSizable | NSViewHeightSizable, NO);
+  [leftColumn addSubview:listWell];
+
+  // Pinned to the bottom of the column, so the conversation list takes the
+  // growth when the window is resized.
+  dropWell = [[[PPDropWell alloc]
+      initWithFrame:NSMakeRect(0, 0, 220, kDropH)] autorelease];
+  [dropWell setDropTarget:self];
+  [dropWell setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
+  [leftColumn addSubview:dropWell];
+
+  [mainSplit addSubview:leftColumn];
   [mainSplit addSubview:rightSplit];
   [mainSplit setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
   [content addSubview:mainSplit];
@@ -988,6 +1151,12 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [text release];
 }
 
+- (void)showLibrary:(id)sender {
+  if (!library) { library = [[PPLibraryController alloc] initWithBridge:bridge]; }
+
+  [library showWindow];
+}
+
 - (void)showSettings:(id)sender {
   if (!settings) {
     settings = [[PPSettingsController alloc] initWithBridge:bridge];
@@ -1003,6 +1172,52 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [self clearTranscript];
   [self appendPlain:@"New conversation.\n\n"];
   [self reloadSessions];
+}
+
+// --- the search index -------------------------------------------------------
+
+- (void)indexDroppedFiles:(NSArray *)paths {
+  if ([bridge isIndexing]) {
+    [self setStatus:@"Already indexing"];
+
+    return;
+  }
+
+  [dropWell beginBusyWithMessage:@"Reading..."];
+
+  if (![bridge indexPaths:paths
+           intoCollection:PPUTF8("reference")
+                 delegate:self]) {
+    [dropWell endBusy];
+    [self presentProblem:@"Could not start indexing." detail:nil];
+  }
+}
+
+- (void)reindexConversations:(id)sender {
+  if ([bridge isIndexing]) {
+    [self setStatus:@"Already indexing"];
+
+    return;
+  }
+
+  [dropWell beginBusyWithMessage:@"Re-indexing conversations..."];
+  if (![bridge reindexConversationsWithDelegate:self]) {
+    [dropWell endBusy];
+  }
+}
+
+// --- PPIndexDelegate, always on the main thread ------------------------------
+
+- (void)indexDidProgress:(NSString *)message fraction:(double)fraction {
+  [dropWell setBusyMessage:message fraction:fraction];
+}
+
+- (void)indexDidFinish:(NSString *)summary added:(NSInteger)documents {
+  [dropWell endBusy];
+  [self setStatus:summary];
+
+  // The library window, if open, is now showing a stale list.
+  if (library) { [library reload]; }
 }
 
 // --- working directory ------------------------------------------------------
@@ -1504,6 +1719,13 @@ static void buildMenuBar(id target) {
                         action:@selector(performMiniaturize:)
                  keyEquivalent:@"m"];
   [windowMenu addItemWithTitle:@"Zoom" action:@selector(performZoom:) keyEquivalent:@""];
+  [windowMenu addItem:[NSMenuItem separatorItem]];
+  [[windowMenu addItemWithTitle:@"Indexed Content"
+                         action:@selector(showLibrary:)
+                  keyEquivalent:@"l"] setTarget:target];
+  [[windowMenu addItemWithTitle:PPUTF8("Re-index Conversations\xE2\x80\xA6")
+                         action:@selector(reindexConversations:)
+                  keyEquivalent:@""] setTarget:target];
   [windowItem setSubmenu:windowMenu];
   [NSApp setWindowsMenu:windowMenu];
 }
@@ -1870,6 +2092,24 @@ static BOOL writeViewPNG(NSView *view, NSString *path) {
     }
 
     [transcript setFrame:saved];
+  }
+
+  // The library window, which otherwise only exists once someone opens it.
+  {
+    if (!library) {
+      library = [[PPLibraryController alloc] initWithBridge:bridge];
+    }
+
+    NSWindow *lib = [library panelWindow];
+    NSString *path = [dir stringByAppendingPathComponent:@"library.png"];
+    if (writeViewPNG([lib contentView], path)) {
+      printf("  ok   library.png\n");
+    }
+
+    else {
+      printf("  FAIL library.png\n");
+      failures++;
+    }
   }
 
   // Each settings tab, which is the only way to see the layout of a pane that

@@ -86,6 +86,18 @@ public:
     // How many chunks are indexed, and how many carry an embedding.
     bool stats(int64_t* chunks, int64_t* embedded, std::string* error) const;
 
+    // What is in the index, so it can be shown and managed rather than being an
+    // opaque file that only grows.
+    struct Document {
+        std::string doc_id;
+        std::string collection;
+        int64_t chunks = 0;
+        int64_t embedded = 0;
+        int64_t updated_at = 0;
+    };
+
+    std::vector<Document> list_documents(const std::string& collection = "") const;
+
 private:
     struct Impl;
     Impl* impl_;

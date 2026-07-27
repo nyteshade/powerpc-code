@@ -100,6 +100,11 @@ struct BridgeState {
   // Everything the transcript needs, kept here so the view can be rebuilt.
   std::vector<std::pair<std::string, std::string>> transcript;  // role, text
   std::mutex transcript_mu;
+
+  // Indexing runs on its own thread and is deliberately serialised: one
+  // database, one writer, and progress that means something.
+  std::thread indexer;
+  std::atomic<bool> indexing{false};
 };
 
 // Declared up front so calls that appear earlier in the file are type-checked.
@@ -159,6 +164,7 @@ struct BridgeState {
   if (st) {
     st->cancel.store(true);
     if (st->worker.joinable()) st->worker.join();
+    if (st->indexer.joinable()) st->indexer.join();
     st->mcp.disconnect_all();
     delete st;
   }
@@ -916,5 +922,225 @@ static ppcode::json ObjCToJson(id o) {
   return static_cast<long long>(st->agent->session_usage().total_tokens);
 }
 - (double)totalCost { return st->agent->session_usage().cost; }
+
+@end
+
+// ---------------------------------------------------------------------------
+// The search index
+// ---------------------------------------------------------------------------
+
+@implementation PPBridge (Index)
+
+- (BOOL)isIndexing { return st->indexing.load() ? YES : NO; }
+
+// Progress and completion are marshalled through these, because the work
+// happens on the indexing thread and AppKit must only ever be touched from the
+// main one.
+- (void)mainIndexProgress:(NSArray *)pair {
+  id d = [pair objectAtIndex:2];
+  if ([d respondsToSelector:@selector(indexDidProgress:fraction:)])
+      [d indexDidProgress:[pair objectAtIndex:0]
+                 fraction:[[pair objectAtIndex:1] doubleValue]];
+}
+
+- (void)mainIndexFinished:(NSArray *)triple {
+  st->indexing.store(false);
+
+  id d = [triple objectAtIndex:2];
+  if ([d respondsToSelector:@selector(indexDidFinish:added:)])
+      [d indexDidFinish:[triple objectAtIndex:0]
+                  added:[[triple objectAtIndex:1] integerValue]];
+}
+
+- (BOOL)indexPaths:(NSArray *)paths
+    intoCollection:(NSString *)collection
+          delegate:(id)indexDelegate {
+  if (st->indexing.load()) return NO;
+  if ([paths count] == 0) return NO;
+
+  // Copied out of Foundation before the thread starts: the caller's array is
+  // not ours to keep, and NSString is not safe to read from another thread
+  // while the main one may release it.
+  std::vector<std::string> list;
+  NSEnumerator *e = [paths objectEnumerator];
+  NSString *p;
+  while ((p = [e nextObject]) != nil) list.push_back(Cpp(p));
+
+  std::string coll = Cpp(collection);
+  if (coll.empty()) coll = rag::kReference;
+
+  if (st->indexer.joinable()) st->indexer.join();
+  st->indexing.store(true);
+
+  PPBridge *me = self;
+  id del = indexDelegate;
+  st->indexer = std::thread([=]() {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+
+    vec::Store store;
+    std::string err;
+    int documents = 0;
+    std::string summary;
+
+    if (!store.open(vec::Store::default_path(), &err)) {
+      summary = "Could not open the index: " + err;
+    }
+
+    else {
+      size_t done = 0;
+      for (size_t i = 0; i < list.size(); i++) {
+        rag::IndexStats stt = rag::index_path(
+            store, list[i], coll,
+            [&](const std::string &m) {
+              double frac = list.size() ? (double)(done) / (double)list.size() : 0.0;
+              NSArray *pair = [NSArray arrayWithObjects:
+                                  Str(m), [NSNumber numberWithDouble:frac],
+                                  del, nil];
+              [me performSelectorOnMainThread:@selector(mainIndexProgress:)
+                                   withObject:pair
+                                waitUntilDone:NO];
+            });
+        documents += stt.documents;
+        done++;
+        if (!stt.error.empty() && summary.empty()) summary = stt.error;
+      }
+
+      int64_t chunks = 0, embedded = 0;
+      store.stats(&chunks, &embedded, nullptr);
+      if (summary.empty()) {
+        summary = "Indexed " + std::to_string(documents) + " document" +
+                  (documents == 1 ? "" : "s") + "; " +
+                  std::to_string(chunks) + " chunks in the index.";
+      }
+    }
+
+    NSArray *triple = [NSArray arrayWithObjects:
+                          Str(summary),
+                          [NSNumber numberWithInteger:documents],
+                          del, nil];
+    [me performSelectorOnMainThread:@selector(mainIndexFinished:)
+                         withObject:triple
+                      waitUntilDone:NO];
+    [pool release];
+  });
+
+  return YES;
+}
+
+- (BOOL)reindexConversationsWithDelegate:(id)indexDelegate {
+  if (st->indexing.load()) return NO;
+
+  if (st->indexer.joinable()) st->indexer.join();
+  st->indexing.store(true);
+
+  PPBridge *me = self;
+  id del = indexDelegate;
+  st->indexer = std::thread([=]() {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+
+    vec::Store store;
+    std::string err;
+    std::string summary;
+    int documents = 0;
+
+    if (!store.open(vec::Store::default_path(), &err)) {
+      summary = "Could not open the index: " + err;
+    }
+
+    else {
+      rag::IndexStats stt = rag::index_all_sessions(
+          store, [&](const std::string &m) {
+            NSArray *pair = [NSArray arrayWithObjects:
+                                Str(m), [NSNumber numberWithDouble:-1.0], del, nil];
+            [me performSelectorOnMainThread:@selector(mainIndexProgress:)
+                                 withObject:pair
+                              waitUntilDone:NO];
+          });
+      documents = stt.documents;
+      summary = "Re-indexed " + std::to_string(stt.documents) +
+                " conversations; " + std::to_string(stt.chunks) + " chunks.";
+    }
+
+    NSArray *triple = [NSArray arrayWithObjects:
+                          Str(summary),
+                          [NSNumber numberWithInteger:documents], del, nil];
+    [me performSelectorOnMainThread:@selector(mainIndexFinished:)
+                         withObject:triple
+                      waitUntilDone:NO];
+    [pool release];
+  });
+
+  return YES;
+}
+
+- (NSArray *)indexedDocuments {
+  NSMutableArray *out = [NSMutableArray array];
+
+  vec::Store store;
+  std::string err;
+  if (!store.open(vec::Store::default_path(), &err)) return out;
+
+  std::vector<vec::Store::Document> docs = store.list_documents();
+  for (size_t i = 0; i < docs.size(); i++) {
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    [d setObject:Str(docs[i].doc_id) forKey:@"docId"];
+    [d setObject:Str(docs[i].collection) forKey:@"collection"];
+    [d setObject:[NSNumber numberWithLongLong:docs[i].chunks] forKey:@"chunks"];
+    [d setObject:[NSNumber numberWithLongLong:docs[i].embedded]
+          forKey:@"embedded"];
+
+    // A conversation id means nothing on screen; a file path is mostly
+    // directory. Show the part that identifies it.
+    NSString *full = Str(docs[i].doc_id);
+    NSString *shown = full;
+    if ([full rangeOfString:@"/"].location != NSNotFound)
+        shown = [full lastPathComponent];
+    [d setObject:shown forKey:@"displayName"];
+
+    [out addObject:d];
+  }
+
+  return out;
+}
+
+- (NSDictionary *)indexStatistics {
+  vec::Store store;
+  std::string err;
+  int64_t chunks = 0, embedded = 0;
+  if (store.open(vec::Store::default_path(), &err))
+      store.stats(&chunks, &embedded, nullptr);
+
+  return [NSDictionary dictionaryWithObjectsAndKeys:
+             [NSNumber numberWithLongLong:chunks], @"chunks",
+             [NSNumber numberWithLongLong:embedded], @"embedded",
+             Str(vec::Store::default_path()), @"path",
+             nil];
+}
+
+- (BOOL)removeIndexedDocument:(NSString *)docId {
+  if (st->indexing.load()) return NO;
+
+  vec::Store store;
+  std::string err;
+  if (!store.open(vec::Store::default_path(), &err)) return NO;
+
+  return store.forget_document(Cpp(docId), &err) ? YES : NO;
+}
+
+- (BOOL)clearIndex {
+  if (st->indexing.load()) return NO;
+
+  // Removed document by document rather than by deleting the file, so anything
+  // holding the database open keeps working.
+  vec::Store store;
+  std::string err;
+  if (!store.open(vec::Store::default_path(), &err)) return NO;
+
+  std::vector<vec::Store::Document> docs = store.list_documents();
+  for (size_t i = 0; i < docs.size(); i++)
+      store.forget_document(docs[i].doc_id, &err);
+
+  return YES;
+}
 
 @end
