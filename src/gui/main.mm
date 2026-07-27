@@ -1592,8 +1592,28 @@ static BOOL writeViewPNG(NSView *view, NSString *path) {
   // Dock quietly show a generic application instead -- so ask ImageIO whether
   // it can actually decode the file, and at which sizes.
   {
-    NSString *icon = [[NSBundle mainBundle] pathForResource:@"ppcode"
-                                                     ofType:@"icns"];
+    NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
+    NSString *named = [info objectForKey:@"CFBundleIconFile"];
+    NSString *icon = [named length]
+        ? [[NSBundle mainBundle] pathForResource:named ofType:@"icns"]
+        : nil;
+
+    // The trap that cost an afternoon: LaunchServices resolves
+    // CFBundleIconFile as written before appending .icns. Resources also holds
+    // the command line tool, so naming the icon "ppcode" pointed the Finder at
+    // a Mach-O executable, which it could not read as an icon and would not
+    // fall back from. Everything else looked correct -- valid icns, valid
+    // plist, right key -- and the application still showed a generic icon.
+    if ([named length]) {
+      NSString *collision =
+          [[[NSBundle mainBundle] resourcePath]
+              stringByAppendingPathComponent:named];
+      BOOL clash = [[NSFileManager defaultManager] fileExistsAtPath:collision];
+      printf("  %-4s nothing shadows the icon name '%s'\n",
+             clash ? "FAIL" : "ok", [named UTF8String]);
+      if (clash) failures++;
+    }
+
     if (!icon) {
       // Running as a bare executable rather than from a bundle: nothing to say.
       printf("  --   not running from a bundle, icon not checked\n");

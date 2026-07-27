@@ -6,7 +6,7 @@ built from Linux. ImageMagick has no ICNS writer either. The format is simple
 enough to emit directly, and doing so means the icon is reproducible from its
 source rather than being a binary nobody can regenerate.
 
-  ./scripts/make_icns.py art/ppcode_9000.png resources/ppcode.icns
+  ./scripts/make_icns.py art/ppcode_9000.png resources/appicon.icns
 
 Layout: 'icns', total length, then chunks of (4-byte type, length including the
 8-byte header, data).

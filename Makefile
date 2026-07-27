@@ -106,7 +106,12 @@ app: $(GUI_BIN) $(BIN)
 	@mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
 	@cp $(GUI_BIN) "$(APP)/Contents/MacOS/ppcode"
 	@cp $(BIN) "$(APP)/Contents/Resources/ppcode"
-	@cp resources/ppcode.icns "$(APP)/Contents/Resources/ppcode.icns"
+	# appicon, not ppcode: Contents/Resources also holds the command line tool,
+	# which is a file literally named "ppcode". LaunchServices resolves
+	# CFBundleIconFile by trying that name as given before appending .icns, so it
+	# found the Mach-O executable, failed to read an icon out of it, and showed a
+	# generic application. It does not fall through to ppcode.icns.
+	@cp resources/appicon.icns "$(APP)/Contents/Resources/appicon.icns"
 	@printf '%s' 'APPL????' > "$(APP)/Contents/PkgInfo"
 	@printf '%s\n' \
 	  '<?xml version="1.0" encoding="UTF-8"?>' \
@@ -115,7 +120,7 @@ app: $(GUI_BIN) $(BIN)
 	  '  <key>CFBundleName</key><string>$(APP_NAME)</string>' \
 	  '  <key>CFBundleDisplayName</key><string>$(APP_NAME)</string>' \
 	  '  <key>CFBundleExecutable</key><string>ppcode</string>' \
-	  '  <key>CFBundleIconFile</key><string>ppcode</string>' \
+	  '  <key>CFBundleIconFile</key><string>appicon</string>' \
 	  '  <key>CFBundleIdentifier</key><string>me.nyteshade.ppcode</string>' \
 	  '  <key>CFBundleVersion</key><string>$(VERSION)$(if $(BUILD_REV),+g$(BUILD_REV),)</string>' \
 	  '  <key>CFBundleShortVersionString</key><string>$(VERSION)</string>' \
