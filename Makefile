@@ -26,6 +26,8 @@ PORTS_LIB := /opt/local/lib
 
 CXXFLAGS  := -std=c++23 -fPIC $(OPT) -Wall -Wextra -Wno-unused-parameter \
              -D_DARWIN_C_SOURCE \
+             -Ithird_party/sqlite \
+             -DSQLITE_CORE -DSQLITE_VEC_STATIC \
              -DPPCODE_VERSION='"$(VERSION)"' \
              -DPPCODE_BUILD_REV='"$(BUILD_REV)"' \
              -Ithird_party -Isrc -I$(PORTS_INC)
@@ -34,6 +36,28 @@ LIBS      := -lcurl -lncurses -lpthread
 
 SRCS      := $(wildcard src/*.cpp)
 OBJS      := $(patsubst src/%.cpp,build/%.o,$(SRCS))
+
+# SQLite and sqlite-vec are vendored as amalgamations and compiled straight in,
+# rather than linked from MacPorts. Three reasons: a downloaded build must not
+# require MacPorts at all, the version is then pinned rather than whatever the
+# machine happens to have, and both are plain C so they sidestep the dual
+# libstdc++ problem entirely. They are also the only C in the project, hence the
+# separate rule and flags below.
+CC        := gcc-mp-15
+SQLITE_SRCS := third_party/sqlite/sqlite3.c third_party/sqlite/sqlite-vec.c
+SQLITE_OBJS := $(patsubst third_party/sqlite/%.c,build/third_party/%.o,$(SQLITE_SRCS))
+
+# SQLITE_CORE + SQLITE_VEC_STATIC: linked in, not loaded as an extension.
+# The rest trims what a desktop-embedded database does not need.
+SQLITE_CFLAGS := -O2 -std=c99 -Ithird_party/sqlite \
+                 -DSQLITE_CORE -DSQLITE_VEC_STATIC \
+                 -DSQLITE_ENABLE_FTS5 \
+                 -DSQLITE_ENABLE_MATH_FUNCTIONS \
+                 -DSQLITE_THREADSAFE=1 \
+                 -DSQLITE_OMIT_LOAD_EXTENSION \
+                 -DSQLITE_DQS=0 \
+                 -DSQLITE_DEFAULT_MEMSTATUS=0 \
+                 -DSQLITE_MAX_EXPR_DEPTH=0
 DEPS      := $(OBJS:.o=.d)
 BIN       := build/ppcode
 
@@ -75,14 +99,17 @@ lint:
 	fi
 
 dirs:
-	@mkdir -p build build/gui
+	@mkdir -p build build/gui build/third_party
 
 # Link to a temporary name and rename into place. Writing directly over a binary
 # that is currently executing fails with ETXTBSY, and rebuilding while ppcode is
 # running is a normal thing to do. rename(2) is atomic and leaves the running
 # process on its old inode, so it keeps working until it exits.
-$(BIN): $(OBJS)
-	$(CXX) $(LDFLAGS) $(OBJS) $(LIBS) -o $@.tmp
+build/third_party/%.o: third_party/sqlite/%.c | dirs
+	$(CC) $(SQLITE_CFLAGS) -c $< -o $@
+
+$(BIN): $(OBJS) $(SQLITE_OBJS)
+	$(CXX) $(LDFLAGS) $(OBJS) $(SQLITE_OBJS) $(LIBS) -o $@.tmp
 	@mv -f $@.tmp $@
 	@echo "built $@"
 
@@ -92,8 +119,9 @@ build/%.o: src/%.cpp | dirs
 build/gui/%.o: src/gui/%.mm | dirs
 	$(CXX) $(CXXFLAGS) -x objective-c++ -MMD -MP -c $< -o $@
 
-$(GUI_BIN): $(CORE_OBJS) $(GUI_OBJS)
-	$(CXX) $(LDFLAGS) $(CORE_OBJS) $(GUI_OBJS) $(LIBS) -framework Cocoa -o $@.tmp
+$(GUI_BIN): $(CORE_OBJS) $(GUI_OBJS) $(SQLITE_OBJS)
+	$(CXX) $(LDFLAGS) $(CORE_OBJS) $(GUI_OBJS) $(SQLITE_OBJS) $(LIBS) \
+	    -framework Cocoa -o $@.tmp
 	@mv -f $@.tmp $@
 	@echo "built $@"
 

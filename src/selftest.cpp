@@ -23,6 +23,7 @@
 #include "tools.hpp"
 #include "xcodeproj.hpp"
 #include "utf8.hpp"
+#include "vecstore.hpp"
 #include "webtools.hpp"
 #include "xib.hpp"
 #include "xml.hpp"
@@ -961,6 +962,145 @@ void test_mdparse() {
     }
 }
 
+
+// The embedded database. SQLite and sqlite-vec are compiled into the binary so
+// a downloaded build needs no MacPorts; these checks are what prove that claim,
+// and that both halves of the search actually work on this hardware.
+void test_vecstore() {
+    std::printf("[vecstore]\n");
+
+    check(!vec::sqlite_version().empty(), "sqlite is linked in");
+    check(!vec::sqlite_vec_version().empty(), "sqlite-vec is linked in");
+
+    fs::path dir = fs::temp_directory_path() / "ppcode-vecstore-test";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    std::string db = (dir / "index.db").string();
+
+    vec::Store store;
+    std::string err;
+    check(store.open(db, &err), "store opens (" + err + ")");
+
+    // Deliberately similar wording, so lexical and semantic ranking disagree --
+    // which is the only way the fusion below proves anything.
+    std::vector<vec::Store::Chunk> chunks;
+    {
+        vec::Store::Chunk c;
+        c.ordinal = 0;
+        c.text = "The dylib relocation rewrites install names to "
+                 "@executable_path so the bundle is self contained.";
+        c.embedding = std::vector<float>{1.0f, 0.0f, 0.0f, 0.0f};
+        chunks.push_back(c);
+    }
+    {
+        vec::Store::Chunk c;
+        c.ordinal = 1;
+        c.text = "Leopard expects JPEG 2000 in the large icon chunks, not PNG.";
+        c.embedding = std::vector<float>{0.0f, 1.0f, 0.0f, 0.0f};
+        chunks.push_back(c);
+    }
+    {
+        vec::Store::Chunk c;
+        c.ordinal = 2;
+        c.text = "Saddle stitching is drawn one stitch at a time along the seam.";
+        c.embedding = std::vector<float>{0.0f, 0.0f, 1.0f, 0.0f};
+        chunks.push_back(c);
+    }
+
+    check(store.put_document("conv-1", "conversations", chunks, &err),
+          "document indexed (" + err + ")");
+
+    int64_t total = 0, embedded = 0;
+    store.stats(&total, &embedded, &err);
+    check(total == 3, "three chunks stored");
+    check(embedded == 3, "three embeddings stored");
+
+    // --- lexical -----------------------------------------------------------
+    {
+        auto hits = store.search_text("install names", 5);
+        check(!hits.empty() && hits[0].doc_id == "conv-1",
+              "FTS5 finds a phrase");
+        check(!hits.empty() &&
+                  hits[0].text.find("@executable_path") != std::string::npos,
+              "FTS5 returns the right chunk");
+    }
+    {
+        // The identifier case: a rare literal token is exactly what BM25 is for.
+        auto hits = store.search_text("JPEG", 5);
+        check(hits.size() == 1 && hits[0].chunk_id == 2,
+              "FTS5 matches a rare token uniquely");
+    }
+    {
+        auto hits = store.search_text("nothing here matches at all zzz", 5);
+        check(hits.empty(), "FTS5 returns nothing for an absent term");
+    }
+
+    // --- vector ------------------------------------------------------------
+    {
+        // Nearest to the second chunk's own vector must be that chunk.
+        std::vector<float> q{0.05f, 0.99f, 0.0f, 0.0f};
+        auto hits = store.search_vector(q, 2);
+        check(!hits.empty() && hits[0].chunk_id == 2,
+              "vector search returns the nearest chunk");
+        check(hits.size() == 2 && hits[0].score > hits[1].score,
+              "vector hits are ordered by similarity");
+    }
+    {
+        // A mismatched width must be refused, not silently compared.
+        std::vector<float> wrong{1.0f, 0.0f};
+        check(store.search_vector(wrong, 2).empty(),
+              "a wrong-width query returns nothing");
+    }
+
+    // --- hybrid ------------------------------------------------------------
+    {
+        // Lexical alone cannot find this: the word "stitch" is present but the
+        // query vector points at the stitching chunk, so fusion must surface it.
+        std::vector<float> q{0.0f, 0.0f, 1.0f, 0.0f};
+        auto hits = store.search("seam", q, 3);
+        bool found = false;
+        for (size_t i = 0; i < hits.size(); i++)
+            if (hits[i].chunk_id == 3) found = true;
+        check(found, "hybrid search fuses both rankings");
+    }
+    {
+        // With no embedding to offer, hybrid must degrade to lexical rather
+        // than returning nothing.
+        auto hits = store.search("JPEG", std::vector<float>(), 3);
+        check(hits.size() == 1 && hits[0].chunk_id == 2,
+              "hybrid degrades to lexical without an embedding");
+    }
+
+    // --- reindexing --------------------------------------------------------
+    {
+        std::vector<vec::Store::Chunk> replacement;
+        vec::Store::Chunk c;
+        c.ordinal = 0;
+        c.text = "Replaced entirely.";
+        replacement.push_back(c);
+
+        check(store.put_document("conv-1", "conversations", replacement, &err),
+              "document re-indexed");
+
+        int64_t n = 0;
+        store.stats(&n, nullptr, &err);
+        check(n == 1, "re-indexing replaces rather than duplicates");
+        check(store.search_text("install names", 5).empty(),
+              "the old text is gone from the index");
+    }
+
+    {
+        check(store.forget_document("conv-1", &err), "document forgotten");
+        int64_t n = -1;
+        store.stats(&n, nullptr, &err);
+        check(n == 0, "forgetting removes every chunk");
+    }
+
+    store.close();
+    fs::remove_all(dir, ec);
+}
+
 void test_web() {
     std::printf("[web]\n");
     check(web::html_to_text("<p>Hello <b>world</b></p>").find("Hello") !=
@@ -1856,6 +1996,7 @@ int run_selftest(bool with_network) {
     test_multimodal();
     test_render();
     test_mdparse();
+    test_vecstore();
     test_web();
     test_plist_and_xcode();
     test_bundler();
