@@ -2,6 +2,7 @@
 #pragma once
 
 #include "common.hpp"
+#include "provider.hpp"
 
 namespace ppcode {
 
@@ -20,9 +21,27 @@ struct McpServerConfig {
 };
 
 struct Config {
+    // Which service. Everything ppcode talks to speaks the same chat shape, so
+    // this selects a base URL, where the key comes from, and which optional
+    // parts of the protocol are actually available. See provider.hpp.
+    std::string provider_id = "openrouter";
+
     std::string model = "anthropic/claude-sonnet-5";
     std::string base_url = "https://openrouter.ai/api/v1";
     std::string api_key;              // never persisted to disk
+
+    // Per-provider keys, so switching provider does not mean re-entering one.
+    // Keyed by provider id. Never persisted; populated from the environment
+    // and the key files.
+    std::map<std::string, std::string> api_keys;
+
+    // The resolved provider. Never null once load() has run.
+    const Provider* provider_info = nullptr;
+
+    // Point this Config at a provider: base URL, default model and key, unless
+    // they were set explicitly. Returns false for an unknown id.
+    bool use_provider(const std::string& id, bool model_was_explicit,
+                      bool base_url_was_explicit);
     std::string system_prompt;        // empty => built-in default
     double temperature = 1.0;
     int max_tokens = 8192;

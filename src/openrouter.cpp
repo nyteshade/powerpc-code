@@ -212,6 +212,9 @@ bool StreamAssembler::feed(const std::string& data) {
         }
         if (usage_.cached_tokens == 0)
             usage_.cached_tokens = jint(*u, "cached_tokens");
+        // DeepSeek's spelling.
+        if (usage_.cached_tokens == 0)
+            usage_.cached_tokens = jint(*u, "prompt_cache_hit_tokens");
         if (usage_.cache_write_tokens == 0)
             usage_.cache_write_tokens = jint(*u, "cache_creation_input_tokens");
     }
@@ -263,8 +266,13 @@ Message StreamAssembler::take_message() {
 http::Headers Client::auth_headers() const {
     http::Headers h;
     h.push_back("Authorization: Bearer " + cfg_.api_key);
-    if (!cfg_.referer.empty()) h.push_back("HTTP-Referer: " + cfg_.referer);
-    if (!cfg_.title.empty())   h.push_back("X-Title: " + cfg_.title);
+    // Attribution headers are an OpenRouter convention. Sending them to
+    // another service is at best ignored and at worst rejected.
+    const Provider* prov = cfg_.provider_info;
+    if (!prov || prov->attribution_headers) {
+        if (!cfg_.referer.empty()) h.push_back("HTTP-Referer: " + cfg_.referer);
+        if (!cfg_.title.empty())   h.push_back("X-Title: " + cfg_.title);
+    }
     return h;
 }
 
@@ -346,12 +354,16 @@ json Client::build_request(const std::vector<Message>& messages,
     if (cfg_.top_p > 0)        req["top_p"] = cfg_.top_p;
     if (cfg_.seed >= 0)        req["seed"] = cfg_.seed;
 
-    if (cfg_.provider.is_object() && !cfg_.provider.empty())
+    const Provider* prov = cfg_.provider_info;
+    bool routing_ok = !prov || prov->supports_routing;
+    bool plugins_ok = !prov || prov->supports_plugins;
+
+    if (routing_ok && cfg_.provider.is_object() && !cfg_.provider.empty())
         req["provider"] = cfg_.provider;
     if (cfg_.reasoning.is_object() && !cfg_.reasoning.empty())
         req["reasoning"] = cfg_.reasoning;
 
-    if (cfg_.web_search) {
+    if (cfg_.web_search && plugins_ok) {
         json plugin = {{"id", "web"}};
         if (cfg_.web_max_results > 0) plugin["max_results"] = cfg_.web_max_results;
         req["plugins"] = json::array({plugin});
@@ -432,6 +444,25 @@ static void sleep_ms(int ms, std::atomic<bool>* cancel) {
     }
 }
 
+
+namespace {
+
+// DeepSeek and a local server report token counts but no money. Filling the
+// figure in from the provider's price table is what keeps --max-cost, the
+// status line and the session totals meaningful rather than stuck at zero --
+// and a zero there would read as "free", not as "unknown".
+void fill_missing_cost(const Config& cfg, Usage* u) {
+    if (!u || u->cost > 0.0) return;
+
+    const Provider* p = cfg.provider_info;
+    if (!p || p->cost_in_usage) return;
+
+    u->cost = estimate_cost(*p, cfg.model, u->prompt_tokens,
+                            u->completion_tokens, u->cached_tokens);
+}
+
+} // namespace
+
 ChatResult Client::chat_stream(const std::vector<Message>& messages,
                                const std::vector<ToolSpec>& tools,
                                const StreamEvents& ev,
@@ -483,6 +514,7 @@ ChatResult Client::chat_stream(const std::vector<Message>& messages,
         attempt_result.cancelled = r.cancelled;
         attempt_result.message = asm_.take_message();
         attempt_result.usage = asm_.usage();
+        fill_missing_cost(cfg_, &attempt_result.usage);
         attempt_result.finish_reason = asm_.finish_reason();
         attempt_result.model = asm_.model().empty() ? cfg_.model : asm_.model();
 
@@ -565,7 +597,12 @@ ChatResult Client::chat(const std::vector<Message>& messages,
             out.usage.completion_tokens = jint(*u, "completion_tokens");
             out.usage.total_tokens      = jint(*u, "total_tokens");
             out.usage.cost              = jnum(*u, "cost");
+            if (const json* d = jptr(*u, "prompt_tokens_details"); d && d->is_object())
+                out.usage.cached_tokens = jint(*d, "cached_tokens");
+            if (out.usage.cached_tokens == 0)
+                out.usage.cached_tokens = jint(*u, "prompt_cache_hit_tokens");
         }
+        fill_missing_cost(cfg_, &out.usage);
 
         const json* choices = jptr(j, "choices");
         if (!choices || !choices->is_array() || choices->empty()) {
@@ -618,10 +655,39 @@ std::vector<ModelInfo> Client::list_models(std::string* error) {
             if (error) *error = "unexpected /models payload";
             return out;
         }
+        const Provider* prov = cfg_.provider_info;
+
         for (const json& m : *data) {
             ModelInfo mi;
             mi.id = jstr(m, "id");
             if (mi.id.empty()) continue;
+
+            // A listing that is only ids -- DeepSeek returns exactly id,
+            // object and owned_by -- carries no context window and no prices,
+            // so the local table supplies them. Without this the context
+            // budget and the spend cap would both be guessing.
+            if (prov && !prov->models_have_metadata) {
+                if (const ModelDefaults* d = prov->model_defaults(mi.id)) {
+                    mi.name = d->id;
+                    mi.context_length = d->context_length;
+                    mi.max_completion_tokens = d->max_completion_tokens;
+                    mi.prompt_cost = d->prompt_cost;
+                    mi.completion_cost = d->completion_cost;
+                    mi.supports_tools = d->supports_tools;
+                    mi.supports_reasoning = d->supports_reasoning;
+                    mi.supports_images = d->supports_images;
+                    mi.description = d->description;
+                    out.push_back(mi);
+                    continue;
+                }
+
+                // An id we have no table entry for: keep it selectable, but
+                // say nothing about it rather than inventing a context window.
+                mi.name = mi.id;
+                mi.supports_tools = true;
+                out.push_back(mi);
+                continue;
+            }
             mi.name = jstr(m, "name", mi.id);
             mi.context_length = jint(m, "context_length");
             if (const json* p = jptr(m, "pricing")) {

@@ -16,13 +16,39 @@ std::string Config::default_path() {
 }
 
 std::string Config::key_from_env() {
-    // The user's box exports OPENROUTER_AI_API_KEY; accept the more common
-    // OPENROUTER_API_KEY spelling too so scripts written elsewhere work.
-    for (const char* name : {"OPENROUTER_AI_API_KEY", "OPENROUTER_API_KEY"}) {
-        const char* v = std::getenv(name);
-        if (v && *v) return std::string(v);
+    // Kept for callers that just want "the key for the default provider".
+    // Per-provider resolution lives in provider.cpp, which also reads the key
+    // files -- a GUI application launched from the Finder inherits no shell
+    // environment, so the environment alone is not enough.
+    return resolve_api_key(default_provider());
+}
+
+bool Config::use_provider(const std::string& id, bool model_was_explicit,
+                          bool base_url_was_explicit) {
+    const Provider* p = find_provider(id);
+    if (!p) return false;
+
+    provider_info = p;
+    provider_id = p->id;
+
+    // Only fill in what the user has not already decided. A --model or a
+    // base_url in the config file must survive switching provider, or
+    // overriding either becomes impossible.
+    if (!base_url_was_explicit) base_url = p->base_url;
+    if (!model_was_explicit && !p->default_model.empty()) model = p->default_model;
+
+    // Keys for every provider are resolved up front, so switching at runtime
+    // does not need another trip to the filesystem.
+    for (const Provider* q : all_providers()) {
+        std::string k = resolve_api_key(*q);
+        if (!k.empty()) api_keys[q->id] = k;
     }
-    return "";
+
+    std::map<std::string, std::string>::const_iterator it = api_keys.find(p->id);
+    if (it != api_keys.end()) api_key = it->second;
+    else if (p->needs_key) api_key.clear();
+
+    return true;
 }
 
 static void parse_mcp(const json& arr, Config& cfg, std::vector<std::string>* warnings) {
@@ -67,6 +93,10 @@ static void parse_mcp(const json& arr, Config& cfg, std::vector<std::string>* wa
 
 Config Config::load(const std::string& explicit_path, std::vector<std::string>* warnings) {
     Config cfg;
+    // Whether the config file named these, so selecting a provider does not
+    // overwrite a deliberate choice.
+    bool model_explicit = false;
+    bool base_url_explicit = false;
     cfg.config_path = explicit_path.empty() ? default_path() : expand_user(explicit_path);
 
     std::string text;
@@ -77,7 +107,10 @@ Config Config::load(const std::string& explicit_path, std::vector<std::string>* 
             json j = json::parse(text, nullptr, true, true);
 
             cfg.model         = jstr(j, "model", cfg.model);
+            if (jptr(j, "base_url")) base_url_explicit = true;
             cfg.base_url      = jstr(j, "base_url", cfg.base_url);
+            if (jptr(j, "model")) model_explicit = true;
+            cfg.provider_id   = jstr(j, "provider_id", cfg.provider_id);
             cfg.system_prompt = jstr(j, "system_prompt", cfg.system_prompt);
             cfg.temperature   = jnum(j, "temperature", cfg.temperature);
             cfg.max_tokens    = static_cast<int>(jint(j, "max_tokens", cfg.max_tokens));
@@ -108,8 +141,18 @@ Config Config::load(const std::string& explicit_path, std::vector<std::string>* 
         }
     }
 
-    // Environment wins over the file for the key and the model.
-    if (std::string k = key_from_env(); !k.empty()) cfg.api_key = k;
+    // The provider decides the base URL, the default model and where the key
+    // comes from, so it is resolved before either is finalised. Whether the
+    // file named them explicitly decides what may be overwritten.
+    if (!cfg.use_provider(cfg.provider_id, model_explicit, base_url_explicit)) {
+        if (warnings)
+            warnings->push_back("unknown provider \"" + cfg.provider_id +
+                                "\"; using " + std::string(default_provider().id) +
+                                ". Known: " + provider_id_list());
+        cfg.use_provider(default_provider().id, model_explicit, base_url_explicit);
+    }
+
+    // Environment still wins for the model.
     if (const char* m = std::getenv("PPCODE_MODEL"); m && *m) cfg.model = m;
 
     return cfg;
@@ -122,6 +165,7 @@ bool Config::save(std::string* error) const {
 
         json j;
         j["model"]              = model;
+        j["provider_id"]        = provider_id;
         j["base_url"]           = base_url;
         j["system_prompt"]      = system_prompt;
         j["temperature"]        = temperature;

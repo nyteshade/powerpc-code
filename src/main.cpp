@@ -61,6 +61,8 @@ const char* kUsage =
     "      --dry-run            with --job, show the resolved settings and exit\n"
     "      --output FORMAT      text (default), json, or stream-json\n"
     "  -m, --model ID           model to use, e.g. anthropic/claude-sonnet-4.5\n"
+    "      --provider NAME      which service to talk to (default openrouter)\n"
+    "      --providers          list known providers and exit\n"
     "  -C, --cwd DIR            working directory for tools\n"
     "  -c, --config PATH        config file (default ~/.config/ppcode/config.json)\n"
     "      --yolo               allow every tool without asking\n"
@@ -144,6 +146,8 @@ int main(int argc, char** argv) {
     bool want_print = false, want_selftest = false, want_net = false;
     bool want_list = false, want_write_config = false, want_help = false;
     bool want_version = false;
+    std::string provider_opt;
+    bool want_providers = false;
     bool yolo = false, quiet = false;
     bool refresh_env = false, no_knowledge = false, show_context = false;
     bool no_project_docs = false;
@@ -195,6 +199,11 @@ int main(int argc, char** argv) {
 
         if (a == "-h" || a == "--help")            want_help = true;
         else if (a == "--version")                 want_version = true;
+        else if (a == "--providers")               want_providers = true;
+        else if (starts_with(a, "--provider="))    provider_opt = a.substr(11);
+        else if (a == "--provider") {
+            if (!take_value(argc, argv, &i, "--provider", &provider_opt)) return 2;
+        }
         else if (a == "--selftest")                want_selftest = true;
         else if (a == "--net")                     want_net = true;
         else if (a == "--yolo")                    yolo = true;
@@ -272,6 +281,16 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (want_providers) {
+        for (const Provider* p : all_providers()) {
+            std::string key = resolve_api_key(*p);
+            std::printf("%-12s %-34s %s\n", p->id.c_str(), p->base_url.c_str(),
+                        !p->needs_key ? "no key required"
+                                      : (key.empty() ? "NO KEY FOUND" : "key found"));
+        }
+        return 0;
+    }
+
     if (want_version) {
         std::printf("ppcode %s (powerpc-apple-darwin9) %s\n",
                     version_full().c_str(), http::version_string().c_str());
@@ -290,6 +309,30 @@ int main(int argc, char** argv) {
     Config cfg = Config::load(config_path, &warnings);
     for (const std::string& w : warnings)
         std::fprintf(stderr, "ppcode: %s\n", w.c_str());
+
+    // --provider is applied after the file so the flag wins, and before the
+    // model override below so that -m still beats the provider's default.
+    if (!provider_opt.empty()) {
+        if (!cfg.use_provider(provider_opt, !model.empty(), false)) {
+            std::fprintf(stderr,
+                         "ppcode: unknown provider \"%s\". Known: %s\n",
+                         provider_opt.c_str(), provider_id_list().c_str());
+            return 2;
+        }
+
+        if (cfg.api_key.empty() && cfg.provider_info &&
+            cfg.provider_info->needs_key) {
+            std::fprintf(stderr,
+                         "ppcode: no API key for %s. Set %s, or put it in "
+                         "~/%s\n",
+                         cfg.provider_info->name.c_str(),
+                         cfg.provider_info->key_env.empty()
+                             ? "the provider's key variable"
+                             : cfg.provider_info->key_env[0].c_str(),
+                         cfg.provider_info->key_file.c_str());
+            return 2;
+        }
+    }
 
     // A job file is read before the CLI overrides so that explicit flags still
     // win over what the file says.

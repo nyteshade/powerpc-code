@@ -23,6 +23,7 @@
 #include "tools.hpp"
 #include "xcodeproj.hpp"
 #include "utf8.hpp"
+#include "provider.hpp"
 #include "rag.hpp"
 #include "vecstore.hpp"
 #include "webtools.hpp"
@@ -1255,6 +1256,97 @@ void test_rag() {
     }
 }
 
+
+// Providers. The differences that matter are which optional parts of the
+// protocol a service implements -- send OpenRouter's routing block to a
+// stricter service and it is a 400, not a shrug.
+void test_providers() {
+    std::printf("[providers]\n");
+
+    check(find_provider("openrouter") != nullptr, "openrouter is registered");
+    check(find_provider("deepseek") != nullptr, "deepseek is registered");
+    check(find_provider("lmstudio") != nullptr, "lmstudio is registered");
+    check(find_provider("nope") == nullptr, "an unknown provider is not resolved");
+    check(find_provider("") == &default_provider(), "empty means the default");
+    check(default_provider().id == "openrouter", "openrouter is the default");
+    check(find_provider("DeepSeek") != nullptr, "provider ids are case-insensitive");
+
+    const Provider* orp = find_provider("openrouter");
+    const Provider* ds = find_provider("deepseek");
+    const Provider* lm = find_provider("lmstudio");
+
+    // The capability flags are the whole point of the abstraction.
+    check(orp->supports_routing && orp->supports_plugins && orp->cost_in_usage,
+          "openrouter advertises routing, plugins and per-request cost");
+    check(!ds->supports_routing && !ds->supports_plugins && !ds->cost_in_usage,
+          "deepseek advertises none of those");
+    check(orp->models_have_metadata && !ds->models_have_metadata,
+          "only openrouter's catalogue carries metadata");
+    check(ds->needs_key && !lm->needs_key, "a local server needs no key");
+    check(ds->base_url == "https://api.deepseek.com", "deepseek base url");
+
+    // Static metadata stands in for what /models does not say.
+    {
+        const ModelDefaults* m = ds->model_defaults("deepseek-v4-flash");
+        check(m != nullptr, "deepseek-v4-flash has defaults");
+        check(m && m->context_length == 1000000, "its context window is known");
+        check(m && m->supports_tools, "it is known to support tools");
+        check(ds->model_defaults("not-a-model") == nullptr,
+              "an unknown model has no defaults");
+    }
+
+    // Cost, which the service does not report and the spend cap depends on.
+    {
+        // 1000 fresh prompt tokens at $0.14/Mtok, 100 completion at $0.28.
+        double c = estimate_cost(*ds, "deepseek-v4-flash", 1000, 100, 0);
+        check(std::abs(c - (1000 * 0.14e-6 + 100 * 0.28e-6)) < 1e-12,
+              "cost from the price table");
+
+        // Cached tokens are inside prompt_tokens, so they are billed at the
+        // cache rate instead of on top of it -- counting them twice would
+        // overstate a long session badly.
+        double cached = estimate_cost(*ds, "deepseek-v4-flash", 1000, 0, 1000);
+        check(std::abs(cached - 1000 * 0.0028e-6) < 1e-12,
+              "a full cache hit is billed at the cache rate");
+        check(cached < estimate_cost(*ds, "deepseek-v4-flash", 1000, 0, 0),
+              "a cache hit costs less than a miss");
+
+        // More cached than prompt tokens must not produce a negative charge.
+        check(estimate_cost(*ds, "deepseek-v4-flash", 100, 0, 100000) >= 0.0,
+              "an impossible cache count cannot go negative");
+
+        check(estimate_cost(*ds, "unknown-model", 1000, 1000, 0) == 0.0,
+              "an unpriced model reports zero rather than guessing");
+    }
+
+    // Selecting a provider rewrites the base URL and default model, but must
+    // not overwrite a model the user chose.
+    {
+        Config c;
+        check(c.use_provider("deepseek", false, false), "switching provider");
+        check(c.base_url == "https://api.deepseek.com", "base url follows");
+        check(c.model == "deepseek-v4-flash", "default model follows");
+
+        Config c2;
+        c2.model = "something/explicit";
+        check(c2.use_provider("deepseek", true, false), "switching again");
+        check(c2.model == "something/explicit", "an explicit model survives");
+
+        Config c3;
+        c3.base_url = "http://my-proxy.local/v1";
+        check(c3.use_provider("deepseek", false, true), "switching a third time");
+        check(c3.base_url == "http://my-proxy.local/v1",
+              "an explicit base url survives");
+
+        Config c4;
+        check(!c4.use_provider("nonsense", false, false),
+              "an unknown provider is refused");
+    }
+
+    check(provider_id_list().find("deepseek") != std::string::npos,
+          "the id list names deepseek");
+}
+
 void test_web() {
     std::printf("[web]\n");
     check(web::html_to_text("<p>Hello <b>world</b></p>").find("Hello") !=
@@ -2152,6 +2244,7 @@ int run_selftest(bool with_network) {
     test_mdparse();
     test_vecstore();
     test_rag();
+    test_providers();
     test_web();
     test_plist_and_xcode();
     test_bundler();
