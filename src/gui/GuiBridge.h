@@ -101,6 +101,30 @@ struct BridgeState;
 - (NSArray *)savedSessions;
 - (BOOL)loadSessionWithId:(NSString *)sessionId;
 
+// Managing saved conversations. All refuse while a turn is running rather than
+// pulling a file out from under the worker thread.
+//
+// `current` tells the caller the session it just operated on was the one loaded,
+// so the interface can start a fresh conversation instead of leaving a
+// transcript on screen that no longer has a file behind it.
+- (BOOL)deleteSessionWithId:(NSString *)sessionId
+                  wasLoaded:(BOOL *)current
+                      error:(NSString **)err;
+
+// Moves the file into an "archive" subdirectory, so it stops appearing in the
+// list without being destroyed.
+- (BOOL)archiveSessionWithId:(NSString *)sessionId
+                   wasLoaded:(BOOL *)current
+                       error:(NSString **)err;
+
+// One JSON object per line: the interchange format for a conversation.
+- (BOOL)exportSessionWithId:(NSString *)sessionId
+                     toPath:(NSString *)path
+                      error:(NSString **)err;
+
+// Returns how many were removed, or -1 if a turn is running.
+- (NSInteger)deleteAllSessions;
+
 - (long long)totalTokens;
 - (double)totalCost;
 

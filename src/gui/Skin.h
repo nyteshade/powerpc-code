@@ -38,6 +38,10 @@
 // A double row of saddle stitching inset from the edge of `rect`.
 + (void)drawStitchingInRect:(NSRect)rect inset:(CGFloat)inset;
 
+// A single straight run of stitching, for a seam where two pieces of hide are
+// joined rather than around the edge of one.
++ (void)drawStitchLineFrom:(NSPoint)a to:(NSPoint)b;
+
 // A recessed well: dark inner shadow at the top, light catch at the bottom.
 // This is what makes a text area look pressed into the leather.
 + (void)drawRecessedWellInRect:(NSRect)rect radius:(CGFloat)radius;

@@ -325,6 +325,21 @@ NSColor *rgba(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
   return p;
 }
 
++ (void)drawStitchLineFrom:(NSPoint)a to:(NSPoint)b {
+  CGFloat dx = b.x - a.x, dy = b.y - a.y;
+  CGFloat len = sqrt(dx * dx + dy * dy);
+  if (len < 4.0) return;
+
+  CGFloat ux = dx / len, uy = dy / len;
+  const CGFloat period = 8.5;
+  int index = 0;
+
+  // Start half a period in so the run does not begin flush against a corner.
+  for (CGFloat pos = period * 0.5; pos < len; pos += period) {
+    draw_stitch(NSMakePoint(a.x + ux * pos, a.y + uy * pos), ux, uy, index++);
+  }
+}
+
 + (void)drawStitchingInRect:(NSRect)rect inset:(CGFloat)inset {
   NSRect r = NSInsetRect(rect, inset, inset);
   if (NSWidth(r) < 24.0 || NSHeight(r) < 24.0) return;
@@ -460,12 +475,31 @@ NSColor *rgba(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
       [[[NSMutableParagraphStyle alloc] init] autorelease];
   [ps setAlignment:NSCenterTextAlignment];
 
-  // Stamped into the surface: a dark impression above, the gold below.
+  // Blocked into the hide with a hot tool: the impression is pressed *into* the
+  // surface, so it is dark where it faces the light and catches a highlight on
+  // the far lip. Three passes -- a soft shadow spread into the leather around
+  // the letter, the dark impression above it, a light catch below, then the
+  // gold. One offset copy on its own reads as a drop shadow rather than
+  // something stamped.
+  NSDictionary *spread = [NSDictionary dictionaryWithObjectsAndKeys:
+      font, NSFontAttributeName,
+      [NSColor colorWithCalibratedWhite:0.0 alpha:0.30], NSForegroundColorAttributeName,
+      ps, NSParagraphStyleAttributeName, nil];
+  [text drawInRect:NSOffsetRect(rect, 0, -2) withAttributes:spread];
+  [text drawInRect:NSOffsetRect(rect, 1, -1) withAttributes:spread];
+  [text drawInRect:NSOffsetRect(rect, -1, -1) withAttributes:spread];
+
   NSDictionary *shade = [NSDictionary dictionaryWithObjectsAndKeys:
       font, NSFontAttributeName,
-      [NSColor colorWithCalibratedWhite:0.0 alpha:0.55], NSForegroundColorAttributeName,
+      [NSColor colorWithCalibratedWhite:0.0 alpha:0.62], NSForegroundColorAttributeName,
       ps, NSParagraphStyleAttributeName, nil];
   [text drawInRect:NSOffsetRect(rect, 0, -1) withAttributes:shade];
+
+  NSDictionary *lip = [NSDictionary dictionaryWithObjectsAndKeys:
+      font, NSFontAttributeName,
+      [NSColor colorWithCalibratedWhite:1.0 alpha:0.16], NSForegroundColorAttributeName,
+      ps, NSParagraphStyleAttributeName, nil];
+  [text drawInRect:NSOffsetRect(rect, 0, 1) withAttributes:lip];
 
   NSDictionary *face = [NSDictionary dictionaryWithObjectsAndKeys:
       font, NSFontAttributeName,

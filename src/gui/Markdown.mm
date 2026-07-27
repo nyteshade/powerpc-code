@@ -179,8 +179,9 @@ NSDictionary *PPMarkdownStreamAttributes(void) {
 NSDictionary *PPMarkdownSpeakerAttributes(NSColor *color) {
   NSMutableParagraphStyle *p =
       [[[NSMutableParagraphStyle alloc] init] autorelease];
-  [p setParagraphSpacingBefore:10.0];
-  [p setParagraphSpacing:2.0];
+  [p setParagraphSpacingBefore:PPMarkdownLineHeight()];
+  [p setParagraphSpacing:0.0];
+  LockToGrid(p, 1);
 
   return [NSDictionary dictionaryWithObjectsAndKeys:
              [NSFont boldSystemFontOfSize:kBodySize], NSFontAttributeName,
@@ -375,8 +376,8 @@ static void EmitList(NSMutableAttributedString *out, const Node &n) {
 
 static void EmitRule(NSMutableAttributedString *out, const Node &n) {
   NSMutableParagraphStyle *p = BaseStyle(n.quote);
-  [p setParagraphSpacingBefore:6.0];
-  [p setParagraphSpacing:8.0];
+  [p setParagraphSpacingBefore:PPMarkdownLineHeight()];
+  [p setParagraphSpacing:PPMarkdownLineHeight()];
   // Real glyphs, and few enough to fit an ordinary window without wrapping.
   // Two earlier attempts failed for reasons worth recording: a run of U+2500
   // depends on the system font having that glyph, and an underline over spaces
@@ -409,13 +410,13 @@ static void EmitCode(NSMutableAttributedString *out, const Node &n) {
   LockToGrid(p, 1);
 
   NSMutableParagraphStyle *first = [[p mutableCopy] autorelease];
-  [first setParagraphSpacingBefore:6.0];
+  [first setParagraphSpacingBefore:PPMarkdownLineHeight()];
 
   NSMutableParagraphStyle *last = [[p mutableCopy] autorelease];
-  [last setParagraphSpacing:8.0];
+  [last setParagraphSpacing:PPMarkdownLineHeight()];
 
   NSMutableParagraphStyle *only = [[first mutableCopy] autorelease];
-  [only setParagraphSpacing:8.0];
+  [only setParagraphSpacing:PPMarkdownLineHeight()];
 
   NSFont *font = MonoFont();
   NSColor *fill = Rgb(0xF2, 0xF2, 0xEC);
@@ -501,12 +502,12 @@ static size_t EmitTable(NSMutableAttributedString *out,
     NSMutableParagraphStyle *rp = p;
     if (node.table_start) {
       rp = [[p mutableCopy] autorelease];
-      [rp setParagraphSpacingBefore:6.0];
+      [rp setParagraphSpacingBefore:PPMarkdownLineHeight()];
     }
 
     if (node.table_end) {
       rp = [[rp mutableCopy] autorelease];
-      [rp setParagraphSpacing:6.0];
+      [rp setParagraphSpacing:PPMarkdownLineHeight()];
     }
 
     std::string text;

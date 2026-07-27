@@ -753,6 +753,130 @@ static ppcode::json ObjCToJson(id o) {
   return out;
 }
 
+// True when `sessionId` is the conversation currently loaded.
+- (BOOL)isCurrentSession:(NSString *)sessionId {
+  std::string want = session::path_for(Cpp(sessionId));
+
+  return st->agent->session_path() == want;
+}
+
+- (BOOL)deleteSessionWithId:(NSString *)sessionId
+                  wasLoaded:(BOOL *)current
+                      error:(NSString **)err {
+  if (st->busy.load()) {
+    if (err) *err = @"Finish the current turn first.";
+
+    return NO;
+  }
+
+  if (current) *current = [self isCurrentSession:sessionId];
+
+  std::error_code ec;
+  std::filesystem::remove(session::path_for(Cpp(sessionId)), ec);
+  if (ec) {
+    if (err) *err = [NSString stringWithUTF8String:ec.message().c_str()];
+
+    return NO;
+  }
+
+  return YES;
+}
+
+- (BOOL)archiveSessionWithId:(NSString *)sessionId
+                   wasLoaded:(BOOL *)current
+                       error:(NSString **)err {
+  if (st->busy.load()) {
+    if (err) *err = @"Finish the current turn first.";
+
+    return NO;
+  }
+
+  if (current) *current = [self isCurrentSession:sessionId];
+
+  std::string src = session::path_for(Cpp(sessionId));
+  std::filesystem::path dir =
+      std::filesystem::path(session::sessions_dir()) / "archive";
+
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  std::filesystem::rename(src, dir / std::filesystem::path(src).filename(), ec);
+  if (ec) {
+    if (err) *err = [NSString stringWithUTF8String:ec.message().c_str()];
+
+    return NO;
+  }
+
+  return YES;
+}
+
+- (BOOL)exportSessionWithId:(NSString *)sessionId
+                     toPath:(NSString *)path
+                      error:(NSString **)err {
+  std::string text, e;
+  if (!read_file_text(session::path_for(Cpp(sessionId)), &text, &e)) {
+    if (err) *err = Str(e);
+
+    return NO;
+  }
+
+  // Non-throwing parse: an explicit catch clause crashes GCC's Objective-C++
+  // front end outright. See knowledge/60-objcpp-gcc.md.
+  ppcode::json j = ppcode::json::parse(text, nullptr, /*allow_exceptions=*/false);
+  if (j.is_discarded()) {
+    if (err) *err = @"That session file is not valid JSON.";
+
+    return NO;
+  }
+
+  // One JSON object per line. Where the session has a messages array those are
+  // the lines, which is the shape anything reading JSONL will expect; otherwise
+  // fall back to the whole document as a single line rather than failing.
+  std::string out;
+  const ppcode::json *msgs = jptr(j, "messages");
+  if (msgs && msgs->is_array()) {
+    for (const ppcode::json &m : *msgs) out += m.dump() + "\n";
+  }
+
+  else {
+    out = j.dump() + "\n";
+  }
+
+  if (!write_file_text(Cpp(path), out, &e)) {
+    if (err) *err = Str(e);
+
+    return NO;
+  }
+
+  return YES;
+}
+
+- (NSInteger)deleteAllSessions {
+  if (st->busy.load()) return -1;
+
+  std::error_code ec;
+  NSInteger n = 0;
+  std::filesystem::path dir(session::sessions_dir());
+
+  std::filesystem::directory_iterator it(dir, ec), end;
+  if (ec) return 0;
+
+  // Collected first: removing entries while iterating the directory is not
+  // something to rely on.
+  std::vector<std::filesystem::path> doomed;
+  for (; it != end; it.increment(ec)) {
+    if (ec) break;
+    if (it->is_regular_file(ec) && it->path().extension() == ".json")
+        doomed.push_back(it->path());
+  }
+
+  for (size_t i = 0; i < doomed.size(); i++) {
+    std::filesystem::remove(doomed[i], ec);
+    if (!ec) n++;
+  }
+
+  return n;
+}
+
 - (BOOL)loadSessionWithId:(NSString *)sessionId {
   std::string path = session::path_for(Cpp(sessionId));
   std::string text, err;

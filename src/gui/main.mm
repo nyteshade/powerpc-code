@@ -176,10 +176,13 @@
   return NO;
 }
 
-// Return sends; Option-Return inserts a newline, matching the terminal front end.
+// Return sends; Shift-Return inserts a newline, which is what every other
+// composer does and what the hands already expect. Option-Return does the same,
+// because that is what this one used to do and muscle memory is muscle memory.
 - (void)keyDown:(NSEvent *)event {
   if ([[event charactersIgnoringModifiers] isEqualToString:@"\r"]) {
-    if ([event modifierFlags] & NSAlternateKeyMask) {
+    unsigned mods = [event modifierFlags];
+    if (mods & (NSShiftKeyMask | NSAlternateKeyMask)) {
       [self insertNewline:self];
 
       return;
@@ -316,16 +319,25 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [super drawRect:dirty];
 
   NSRect b = [self bounds];
-  NSFont *font = [NSFont fontWithName:@"Baskerville" size:15.0];
-  if (!font) { font = [NSFont boldSystemFontOfSize:14.0]; }
 
-  NSRect text = NSMakeRect(0, (NSHeight(b) - 18.0) / 2.0, NSWidth(b), 18.0);
-  [PPSkin drawEmbossedText:@"ppcode"
+  // The band is a separate piece of hide laid over the cover, so it is sewn on
+  // along its bottom edge. Without this the seam around the window simply
+  // disappeared behind the band, which looked like the stitching had been
+  // forgotten along the top.
+  [PPSkin drawStitchLineFrom:NSMakePoint(NSMinX(b) + 6.0, NSMinY(b) + 4.5)
+                          to:NSMakePoint(NSMaxX(b) - 6.0, NSMinY(b) + 4.5)];
+
+  NSFont *font = [NSFont fontWithName:@"Baskerville" size:16.0];
+  if (!font) { font = [NSFont boldSystemFontOfSize:15.0]; }
+
+  // Sits above the seam, not centred in the whole band.
+  NSRect text = NSMakeRect(0, NSMinY(b) + 11.0, NSWidth(b), 20.0);
+  [PPSkin drawEmbossedText:@"PowerPC Code"
                     inRect:text
                       font:font
-                     color:[NSColor colorWithCalibratedRed:0.83
-                                                     green:0.71
-                                                      blue:0.44
+                     color:[NSColor colorWithCalibratedRed:0.85
+                                                     green:0.73
+                                                      blue:0.46
                                                      alpha:1.0]];
 }
 
@@ -366,18 +378,49 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 - (void)send:(id)sender;
 - (void)attachmentsChanged;
 - (void)removeAttachment:(id)sender;
+- (void)openSession:(id)sender;
+- (void)exportSession:(id)sender;
+- (void)archiveSession:(id)sender;
+- (void)deleteSession:(id)sender;
+- (void)clearAllConversations:(id)sender;
+- (void)afterRemovingSessionWasLoaded:(BOOL)wasLoaded message:(NSString *)message;
+- (void)presentProblem:(NSString *)text detail:(NSString *)detail;
+- (void)setStatus:(NSString *)text;
+- (void)reloadSessions;
 - (void)showSettings:(id)sender;
 - (void)newConversation:(id)sender;
 - (void)clearTranscript;
 - (void)flushStream;
 - (void)buildWindow;
 - (void)populateModels;
-- (void)reloadSessions;
 @end
 
 @implementation PPController
 
 // --- transcript helpers ----------------------------------------------------
+
+// Status text sits directly on the leather with nothing behind it, so light
+// type alone is thin and low-contrast. A dark shadow underneath separates it
+// from the hide the way embossed lettering separates from a cover.
+- (void)setStatus:(NSString *)text {
+  if (!text) { text = @""; }
+
+  NSShadow *shadow = [[[NSShadow alloc] init] autorelease];
+  [shadow setShadowColor:[NSColor colorWithCalibratedWhite:0.0 alpha:0.85]];
+  [shadow setShadowOffset:NSMakeSize(0.0, -1.0)];
+  [shadow setShadowBlurRadius:2.5];
+
+  NSDictionary *attrs = [NSDictionary dictionaryWithObjectsAndKeys:
+      [NSFont systemFontOfSize:11.0], NSFontAttributeName,
+      [NSColor colorWithCalibratedWhite:0.92 alpha:1.0],
+          NSForegroundColorAttributeName,
+      shadow, NSShadowAttributeName,
+      nil];
+
+  [statusField setAttributedStringValue:
+      [[[NSAttributedString alloc] initWithString:text
+                                       attributes:attrs] autorelease]];
+}
 
 - (void)clearTranscript {
   [mdBuffer release];
@@ -406,10 +449,19 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
       : (bold ? [NSFont boldSystemFontOfSize:12.0] : [NSFont systemFontOfSize:12.0]);
   if (!font) { font = [NSFont systemFontOfSize:12.0]; }
 
+  // Chrome has to sit on the same baseline grid as everything else. With no
+  // paragraph style it took the font's natural line height, and one tool line
+  // was enough to knock every rule below it out of step with the writing.
+  NSMutableParagraphStyle *p =
+      [[[NSMutableParagraphStyle alloc] init] autorelease];
+  [p setMinimumLineHeight:PPMarkdownLineHeight()];
+  [p setMaximumLineHeight:PPMarkdownLineHeight()];
+
   NSDictionary *attrs = [NSDictionary dictionaryWithObjectsAndKeys:
                             font, NSFontAttributeName,
                             color ? color : [NSColor blackColor],
                                 NSForegroundColorAttributeName,
+                            p, NSParagraphStyleAttributeName,
                             nil];
 
   [self appendAttributed:[[[NSAttributedString alloc] initWithString:text
@@ -548,10 +600,14 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   // related controls. Beyond the HIG, the margin is what the leather is *for* --
   // with the content running to the edges there was nowhere for the stitching to
   // sit, and it was drawn underneath the panels where nobody could see it.
-  const CGFloat kMargin = 18.0;   // leather visible around the content
-  const CGFloat kBarH = 38.0;     // bottom control strip
-  const CGFloat kHeaderH = 34.0;
+  // 24 rather than 18 so the seam, which runs 7 in from the window edge, has
+  // clear air between it and the controls instead of nearly touching the Send
+  // button.
+  const CGFloat kMargin = 24.0;   // leather visible around the content
+  const CGFloat kBarH = 52.0;     // bottom control strip
+  const CGFloat kHeaderH = 38.0;
   const CGFloat kGap = 10.0;
+  const CGFloat kSeamClear = 18.0;  // controls stay this far off the bottom seam
 
   CGFloat contentTop = 640 - kHeaderH;
   CGFloat splitBottom = kBarH + kGap;
@@ -596,6 +652,28 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   // was being cut through the middle.
   [sessionTable setRowHeight:40.0];
   [sessionTable setIntercellSpacing:NSMakeSize(3.0, 4.0)];
+
+  // Right-click on a conversation. The destructive items are last and
+  // separated, so the pointer does not land on Delete by momentum.
+  NSMenu *rowMenu = [[[NSMenu alloc] initWithTitle:@"Conversation"] autorelease];
+  struct { NSString *title; SEL action; BOOL separatorBefore; } rowItems[] = {
+      {@"Open",                    @selector(openSession:),   NO},
+      {PPUTF8("Export as JSONL\xE2\x80\xA6"),
+                                   @selector(exportSession:), NO},
+      {@"Archive",                 @selector(archiveSession:), YES},
+      {PPUTF8("Delete\xE2\x80\xA6"), @selector(deleteSession:), NO},
+  };
+  for (unsigned i = 0; i < sizeof(rowItems) / sizeof(rowItems[0]); i++) {
+    if (rowItems[i].separatorBefore) {
+      [rowMenu addItem:[NSMenuItem separatorItem]];
+    }
+
+    [[rowMenu addItemWithTitle:rowItems[i].title
+                        action:rowItems[i].action
+                 keyEquivalent:@""] setTarget:self];
+  }
+  [sessionTable setMenu:rowMenu];
+
   [listScroll setDocumentView:sessionTable];
 
   // --- right: transcript over composer ------------------------------------
@@ -679,7 +757,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 
   // --- bottom bar ---------------------------------------------------------
   statusField = [[[NSTextField alloc]
-      initWithFrame:NSMakeRect(kMargin, (kBarH - 18) / 2, 560, 18)]
+      initWithFrame:NSMakeRect(kMargin, kSeamClear + 4, 560, 18)]
                     autorelease];
   [statusField setBezeled:NO];
   [statusField setDrawsBackground:NO];
@@ -688,7 +766,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [statusField setFont:[NSFont systemFontOfSize:11.0]];
   // Light type: this row sits directly on the leather, not on paper.
   [statusField setTextColor:[NSColor colorWithCalibratedWhite:0.86 alpha:1.0]];
-  [statusField setStringValue:@"Ready"];
+  [self setStatus:@"Ready"];
   [content addSubview:statusField];
 
   // The attachment count used to be a label here. It is a row of removable
@@ -699,7 +777,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   // then 8 between related controls.
   CGFloat right = 940 - kMargin;
   CGFloat sendW = 85, popupW = 190, ctlH = 26;
-  CGFloat ctlY = (kBarH - ctlH) / 2;
+  CGFloat ctlY = kSeamClear;
 
   sendButton = [[[NSButton alloc]
       initWithFrame:NSMakeRect(right - sendW, ctlY, sendW, ctlH)] autorelease];
@@ -721,7 +799,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 
   spinner = [[[NSProgressIndicator alloc]
       initWithFrame:NSMakeRect(right - sendW - 8 - popupW - 8 - 16,
-                               (kBarH - 16) / 2, 16, 16)] autorelease];
+                               ctlY + (ctlH - 16) / 2, 16, 16)] autorelease];
   [spinner setStyle:NSProgressIndicatorSpinningStyle];
   [spinner setControlSize:NSSmallControlSize];
   [spinner setDisplayedWhenStopped:NO];
@@ -741,14 +819,27 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   while ((f = [fe nextObject]) != nil) [modelPopup addItemWithTitle:f];
   [[modelPopup menu] addItem:[NSMenuItem separatorItem]];
 
-  NSArray *all = [bridge availableModels];
-  NSEnumerator *me = [all objectEnumerator];
+  // The pinned models keep the order Brielle put them in -- that order is a
+  // ranking, not a list. Everything after the separator is alphabetical, since
+  // the catalogue arrives in whatever order OpenRouter felt like and hunting
+  // for a model id in an unsorted list of a hundred is miserable.
+  NSMutableArray *rest = [NSMutableArray array];
+  NSEnumerator *me = [[bridge availableModels] objectEnumerator];
   NSDictionary *m;
-  int added = 0;
   while ((m = [me nextObject]) != nil) {
     NSString *mid = [m objectForKey:@"id"];
-    if ([favs containsObject:mid]) continue;
+    if (!mid || [favs containsObject:mid]) continue;
     if (![[m objectForKey:@"tools"] boolValue]) continue;   // useless here
+
+    [rest addObject:mid];
+  }
+
+  [rest sortUsingSelector:@selector(caseInsensitiveCompare:)];
+
+  NSEnumerator *re = [rest objectEnumerator];
+  NSString *mid;
+  int added = 0;
+  while ((mid = [re nextObject]) != nil) {
     [modelPopup addItemWithTitle:mid];
     if (++added >= 120) break;
   }
@@ -771,7 +862,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
           bold:YES mono:NO];
   [self appendPlain:[NSString stringWithFormat:
       @"Working in %@\nModel: %@%@\n\nDrag files or images into the composer to "
-       "attach them. Return sends, Option-Return inserts a newline.\n\n",
+       "attach them. Return sends, Shift-Return inserts a newline.\n\n",
       [bridge workingDirectory], [bridge modelId],
       [bridge modelSupportsImages] ? @" (can see images)" : @" (text only)"]];
 
@@ -829,7 +920,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   // the change is refused rather than raced. Put the popup back where it was.
   if ([bridge isBusy]) {
     [modelPopup selectItemWithTitle:[bridge modelId]];
-    [statusField setStringValue:@"Finish the current turn before changing model"];
+    [self setStatus:@"Finish the current turn before changing model"];
 
     return;
   }
@@ -894,6 +985,155 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [self clearTranscript];
   [self appendPlain:@"New conversation.\n\n"];
   [self reloadSessions];
+}
+
+// --- conversation management ------------------------------------------------
+
+// The row the context menu was opened on, or the selected row when the action
+// came from the menu bar. -1 when neither applies.
+- (NSInteger)targetSessionRow {
+  NSInteger row = [sessionTable clickedRow];
+  if (row < 0) { row = [sessionTable selectedRow]; }
+  if (row < 0 || row >= (NSInteger)[sessions count]) { return -1; }
+
+  return row;
+}
+
+- (NSDictionary *)targetSession {
+  NSInteger row = [self targetSessionRow];
+
+  return row < 0 ? nil : [sessions objectAtIndex:(NSUInteger)row];
+}
+
+- (void)openSession:(id)sender {
+  NSInteger row = [self targetSessionRow];
+  if (row < 0) { return; }
+
+  [sessionTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row]
+            byExtendingSelection:NO];
+}
+
+- (void)exportSession:(id)sender {
+  NSDictionary *s = [self targetSession];
+  if (!s) { return; }
+
+  NSSavePanel *panel = [NSSavePanel savePanel];
+  [panel setRequiredFileType:@"jsonl"];
+  [panel setTitle:@"Export Conversation"];
+
+  NSString *suggested =
+      [[s objectForKey:@"title"] stringByReplacingOccurrencesOfString:@"/"
+                                                           withString:@"-"];
+  if (![suggested length]) { suggested = @"conversation"; }
+
+  if ([panel runModalForDirectory:NSHomeDirectory() file:suggested] != NSOKButton) {
+    return;
+  }
+
+  NSString *err = nil;
+  if ([bridge exportSessionWithId:[s objectForKey:@"id"]
+                           toPath:[panel filename]
+                            error:&err]) {
+    [self setStatus:[NSString stringWithFormat:@"Exported to %@",
+                        [[panel filename] lastPathComponent]]];
+  }
+
+  else {
+    [self presentProblem:@"Could not export that conversation." detail:err];
+  }
+}
+
+- (void)archiveSession:(id)sender {
+  NSDictionary *s = [self targetSession];
+  if (!s) { return; }
+
+  BOOL wasLoaded = NO;
+  NSString *err = nil;
+  if (![bridge archiveSessionWithId:[s objectForKey:@"id"]
+                          wasLoaded:&wasLoaded
+                              error:&err]) {
+    [self presentProblem:@"Could not archive that conversation." detail:err];
+
+    return;
+  }
+
+  [self afterRemovingSessionWasLoaded:wasLoaded
+                              message:@"Archived. The file is still in the "
+                                       "sessions folder, under archive."];
+}
+
+- (void)deleteSession:(id)sender {
+  NSDictionary *s = [self targetSession];
+  if (!s) { return; }
+
+  NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+  [alert setMessageText:[NSString stringWithFormat:@"Delete %@?",
+                            [s objectForKey:@"title"]]];
+  [alert setInformativeText:@"This removes the saved conversation from disk. "
+                             "Archive keeps it instead."];
+  [alert addButtonWithTitle:@"Delete"];
+  [alert addButtonWithTitle:@"Cancel"];
+  [alert setAlertStyle:NSWarningAlertStyle];
+  if ([alert runModal] != NSAlertFirstButtonReturn) { return; }
+
+  BOOL wasLoaded = NO;
+  NSString *err = nil;
+  if (![bridge deleteSessionWithId:[s objectForKey:@"id"]
+                         wasLoaded:&wasLoaded
+                             error:&err]) {
+    [self presentProblem:@"Could not delete that conversation." detail:err];
+
+    return;
+  }
+
+  [self afterRemovingSessionWasLoaded:wasLoaded message:@"Conversation deleted."];
+}
+
+- (void)clearAllConversations:(id)sender {
+  NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+  [alert setMessageText:@"Delete every saved conversation?"];
+  [alert setInformativeText:
+      [NSString stringWithFormat:@"All %lu conversations will be removed from "
+                                  "disk. This cannot be undone.",
+                                 (unsigned long)[sessions count]]];
+  [alert addButtonWithTitle:@"Delete All"];
+  [alert addButtonWithTitle:@"Cancel"];
+  [alert setAlertStyle:NSCriticalAlertStyle];
+  if ([alert runModal] != NSAlertFirstButtonReturn) { return; }
+
+  NSInteger n = [bridge deleteAllSessions];
+  if (n < 0) {
+    [self presentProblem:@"Finish the current turn first." detail:nil];
+
+    return;
+  }
+
+  [self afterRemovingSessionWasLoaded:YES
+                              message:[NSString stringWithFormat:
+                                          @"Deleted %ld conversations.", (long)n]];
+}
+
+// Shared tail: the list is stale either way, and if the conversation on screen
+// no longer has a file behind it, start a fresh one rather than leaving a
+// transcript that cannot be saved back.
+- (void)afterRemovingSessionWasLoaded:(BOOL)wasLoaded message:(NSString *)message {
+  [self reloadSessions];
+
+  if (wasLoaded) {
+    [bridge newConversation];
+    [self clearTranscript];
+  }
+
+  [self setStatus:message];
+}
+
+- (void)presentProblem:(NSString *)text detail:(NSString *)detail {
+  NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+  [alert setMessageText:text];
+  if ([detail length]) { [alert setInformativeText:detail]; }
+  [alert addButtonWithTitle:@"OK"];
+  [alert setAlertStyle:NSWarningAlertStyle];
+  [alert runModal];
 }
 
 - (void)reloadSessions {
@@ -990,7 +1230,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 - (void)bridgeDidStart {
   streaming = NO;
   [spinner startAnimation:nil];
-  [statusField setStringValue:PPUTF8("Thinking\xE2\x80\xA6")];
+  [self setStatus:PPUTF8("Thinking\xE2\x80\xA6")];
 }
 
 - (void)bridgeDidReceiveText:(NSString *)delta {
@@ -1012,7 +1252,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
                    name, detail]
          color:[NSColor colorWithCalibratedRed:0.55 green:0.4 blue:0.0 alpha:1.0]
           bold:NO mono:YES];
-  [statusField setStringValue:
+  [self setStatus:
       [NSString stringWithFormat:PPUTF8("Running %@\xE2\x80\xA6"), name]];
 }
 
@@ -1033,7 +1273,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 }
 
 - (void)bridgeDidUpdateStatus:(NSString *)status {
-  [statusField setStringValue:status];
+  [self setStatus:status];
 }
 
 - (void)bridgeDidError:(NSString *)message {
@@ -1045,7 +1285,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 - (void)bridgeDidFinishTurnWithTokens:(long long)tokens cost:(double)cost {
   [self flushStream];
   [spinner stopAnimation:nil];
-  [statusField setStringValue:
+  [self setStatus:
       [NSString stringWithFormat:
           PPUTF8("Ready \xC2\xB7 %lld tokens \xC2\xB7 $%.4f"), tokens, cost]];
   [self appendPlain:@"\n"];
@@ -1144,6 +1384,13 @@ static void buildMenuBar(id target) {
   [[fileMenu addItemWithTitle:@"New Conversation"
                        action:@selector(newConversation:)
                 keyEquivalent:@"n"] setTarget:target];
+  [fileMenu addItem:[NSMenuItem separatorItem]];
+  [[fileMenu addItemWithTitle:PPUTF8("Export Conversation as JSONL\xE2\x80\xA6")
+                       action:@selector(exportSession:)
+                keyEquivalent:@""] setTarget:target];
+  [[fileMenu addItemWithTitle:PPUTF8("Delete All Conversations\xE2\x80\xA6")
+                       action:@selector(clearAllConversations:)
+                keyEquivalent:@""] setTarget:target];
   [fileMenu addItem:[NSMenuItem separatorItem]];
   [fileMenu addItemWithTitle:@"Close"
                       action:@selector(performClose:)

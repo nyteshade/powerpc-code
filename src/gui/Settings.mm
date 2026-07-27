@@ -454,6 +454,16 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
   cliLocation = [[[NSPopUpButton alloc]
       initWithFrame:NSMakeRect(116, Centred(r, 26, kPopupH), 220, kPopupH)]
                     autorelease];
+  // ~/.local/bin only if it exists: offering a directory that is not there
+  // invites installing into a path nothing on PATH will ever look at.
+  NSString *dotLocal =
+      [NSHomeDirectory() stringByAppendingPathComponent:@".local/bin"];
+  BOOL isDir = NO;
+  if ([[NSFileManager defaultManager] fileExistsAtPath:dotLocal
+                                          isDirectory:&isDir] && isDir) {
+    [cliLocation addItemWithTitle:dotLocal];
+  }
+
   [cliLocation addItemWithTitle:
       [NSHomeDirectory() stringByAppendingPathComponent:@"bin"]];
   [cliLocation addItemWithTitle:@"/usr/local/bin"];
@@ -625,6 +635,7 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
   NSString *bundledVer = bundled ? [bridge cliVersionAt:bundled] : nil;
   NSString *installed = nil;
   NSEnumerator *le = [[NSArray arrayWithObjects:
+      [NSHomeDirectory() stringByAppendingPathComponent:@".local/bin/ppcode"],
       [NSHomeDirectory() stringByAppendingPathComponent:@"bin/ppcode"],
       @"/usr/local/bin/ppcode", nil] objectEnumerator];
   NSString *cand;
