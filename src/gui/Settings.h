@@ -22,6 +22,11 @@
   NSSecureTextField *tavilyKey;
   NSSecureTextField *braveKey;
 
+  // Provider
+  NSPopUpButton *providerPopup;
+  NSTextField *providerURL;
+  NSTextField *providerStatus;
+
   // Model
   NSPopUpButton *defaultModel;
   NSTextField *maxTokensField;

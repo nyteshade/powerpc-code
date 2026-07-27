@@ -186,7 +186,10 @@ public:
     std::vector<const ModelInfo*> search(const std::string& query,
                                          size_t limit = 200) const;
 
-    static std::string cache_path();
+    // Per provider: one shared file would serve OpenRouter's catalogue to
+    // DeepSeek, which is both wrong and invisible until someone wonders why
+    // the model list looks nothing like the service they selected.
+    static std::string cache_path(const std::string& provider_id);
 
     // Context window to assume when the catalogue has no entry for a model.
     static constexpr int64_t kUnknownContext = 128000;
@@ -198,14 +201,18 @@ private:
     std::vector<ModelInfo> models_;
     std::map<std::string, size_t> by_id_;
 
+    // Whose catalogue this is. Set by load().
+    std::string provider_id_ = "openrouter";
+
     void reindex();
     bool read_cache(int64_t max_age_s);
     void write_cache() const;
 };
 
-// Model ids worth putting in front of the user rather than making them recall.
-// Ordered deliberately: ascending capability and cost.
-const std::vector<std::string>& favorite_models();
+// Model ids worth putting in front of the user rather than making them recall,
+// ordered by ascending capability and cost. Provider-specific: OpenRouter's ids
+// are meaningless to DeepSeek and vice versa.
+std::vector<std::string> favorite_models(const std::string& provider_id);
 
 // ---------------------------------------------------------------------------
 // Client

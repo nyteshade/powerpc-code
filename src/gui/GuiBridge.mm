@@ -713,6 +713,86 @@ static ppcode::json ObjCToJson(id o) {
   return YES;
 }
 
+- (NSArray *)availableProviders {
+  NSMutableArray *out = [NSMutableArray array];
+  for (const Provider *p : all_providers()) {
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    [d setObject:Str(p->id) forKey:@"id"];
+    [d setObject:Str(p->name) forKey:@"name"];
+    [d setObject:[self baseURLForProvider:Str(p->id)] forKey:@"baseURL"];
+    [d setObject:[NSNumber numberWithBool:p->needs_key ? YES : NO]
+          forKey:@"needsKey"];
+    [d setObject:[NSNumber numberWithBool:!resolve_api_key(*p).empty()]
+          forKey:@"hasKey"];
+    [out addObject:d];
+  }
+
+  return out;
+}
+
+- (NSString *)providerId { return Str(st->cfg.provider_id); }
+
+- (BOOL)setProviderId:(NSString *)pid {
+  // Same reasoning as the model and the working directory: the worker thread
+  // reads the config for the whole of a turn.
+  if (st->busy.load()) return NO;
+
+  std::string want = Cpp(pid);
+  if (want == st->cfg.provider_id) return YES;
+  if (!find_provider(want)) return NO;
+
+  // The model belongs to the old provider, so it is deliberately not treated
+  // as explicit here -- switching should land on the new provider's default
+  // rather than carrying over an id it will reject.
+  if (!st->cfg.use_provider(want, /*model_was_explicit=*/false,
+                            /*base_url_was_explicit=*/false))
+    return NO;
+
+  st->client->set_config(st->cfg);
+  st->client->set_model(st->cfg.model);
+
+  // The catalogue is per provider and keyed by it, so this refetches rather
+  // than showing the previous service's models.
+  st->catalog = ModelCatalog();
+  [self rebuildSystemPrompt];
+
+  return YES;
+}
+
+- (NSString *)baseURLForProvider:(NSString *)pid {
+  std::string want = Cpp(pid);
+  std::map<std::string, std::string>::const_iterator it =
+      st->cfg.provider_urls.find(want);
+  if (it != st->cfg.provider_urls.end() && !it->second.empty())
+      return Str(it->second);
+
+  const Provider *p = find_provider(want);
+
+  return p ? Str(p->base_url) : @"";
+}
+
+- (BOOL)setBaseURL:(NSString *)url forProvider:(NSString *)pid {
+  if (st->busy.load()) return NO;
+
+  std::string want = Cpp(pid);
+  const Provider *p = find_provider(want);
+  if (!p) return NO;
+
+  std::string u = trim(Cpp(url));
+  if (u.empty() || u == p->base_url) st->cfg.provider_urls.erase(want);
+  else st->cfg.provider_urls[want] = u;
+
+  // Takes effect immediately when it is the provider in use.
+  if (want == st->cfg.provider_id) {
+    st->cfg.base_url = u.empty() ? p->base_url : u;
+    st->client->set_config(st->cfg);
+    st->catalog = ModelCatalog();
+  }
+
+  std::string err;
+  return st->cfg.save(&err) ? YES : NO;
+}
+
 - (NSString *)modelId { return Str(st->cfg.model); }
 
 - (void)setModelId:(NSString *)mid {
@@ -757,7 +837,7 @@ static ppcode::json ObjCToJson(id o) {
 
 - (NSArray *)favouriteModelIds {
   NSMutableArray *out = [NSMutableArray array];
-  for (const std::string &id_ : favorite_models()) [out addObject:Str(id_)];
+  for (const std::string &id_ : favorite_models(st->cfg.provider_id)) [out addObject:Str(id_)];
 
   return out;
 }

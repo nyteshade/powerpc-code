@@ -78,6 +78,24 @@ struct BridgeState;
 - (BOOL)isPortInstalled:(NSString *)port;
 - (NSString *)macportsPrefix;
 
+// --- providers ---------------------------------------------------------
+//
+// Which service to talk to. The command line has --provider; without this the
+// application could only ever use whatever the config file said.
+
+// Dictionaries with: id, name, baseURL, hasKey, needsKey.
+- (NSArray *)availableProviders;
+- (NSString *)providerId;
+
+// Switching reloads the model catalogue, since the previous provider's ids
+// mean nothing to the new one. Returns NO while a turn is running.
+- (BOOL)setProviderId:(NSString *)pid;
+
+// The address for a provider, and a persisted override for it. LM Studio
+// cannot run on a PowerPC G5, so it is always on another machine.
+- (NSString *)baseURLForProvider:(NSString *)pid;
+- (BOOL)setBaseURL:(NSString *)url forProvider:(NSString *)pid;
+
 - (NSString *)modelId;
 - (void)setModelId:(NSString *)mid;
 

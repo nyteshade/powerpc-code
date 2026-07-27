@@ -744,24 +744,29 @@ std::vector<ModelInfo> Client::list_models(std::string* error) {
 // ModelCatalog
 // ---------------------------------------------------------------------------
 
-const std::vector<std::string>& favorite_models() {
-    // Ordered by ascending capability and cost, per the user's stated
-    // preference, with the Anthropic default first since it is the built-in.
-    static const std::vector<std::string> favs = {
-        "anthropic/claude-sonnet-5",
-        "deepseek/deepseek-v4-pro",
-        "z-ai/glm-5.2",
-        "moonshotai/kimi-k3",
-    };
+std::vector<std::string> favorite_models(const std::string& provider_id) {
+    const Provider* p = find_provider(provider_id);
+    if (!p) p = &default_provider();
+
+    std::vector<std::string> favs;
+    // The provider's default first, since it is what a bare launch uses.
+    if (!p->default_model.empty()) favs.push_back(p->default_model);
+    for (const std::string& f : p->favourites) {
+        if (std::find(favs.begin(), favs.end(), f) == favs.end())
+            favs.push_back(f);
+    }
+
     return favs;
 }
 
-std::string ModelCatalog::cache_path() {
+std::string ModelCatalog::cache_path(const std::string& provider_id) {
+    std::string name = "models-" + (provider_id.empty() ? std::string("openrouter")
+                                                        : provider_id) + ".json";
     if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
-        return std::string(xdg) + "/ppcode/models.json";
+        return std::string(xdg) + "/ppcode/" + name;
     if (const char* home = std::getenv("HOME"); home && *home)
-        return std::string(home) + "/.cache/ppcode/models.json";
-    return "/tmp/ppcode-models.json";
+        return std::string(home) + "/.cache/ppcode/" + name;
+    return "/tmp/ppcode-" + name;
 }
 
 void ModelCatalog::reindex() {
@@ -771,7 +776,7 @@ void ModelCatalog::reindex() {
 
 bool ModelCatalog::read_cache(int64_t max_age_s) {
     std::string text;
-    if (!read_file_text(cache_path(), &text, nullptr)) return false;
+    if (!read_file_text(cache_path(provider_id_), &text, nullptr)) return false;
     try {
         json j = json::parse(text);
         int64_t stamp = jint(j, "fetched_at");
@@ -826,7 +831,7 @@ void ModelCatalog::write_cache() const {
     j["fetched_at"] = static_cast<int64_t>(std::time(nullptr));
     j["models"] = arr;
 
-    std::string path = cache_path();
+    std::string path = cache_path(provider_id_);
     std::error_code ec;
     std::filesystem::path p(path);
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
@@ -837,6 +842,16 @@ void ModelCatalog::write_cache() const {
 
 bool ModelCatalog::load(Client& client, std::string* error, bool force_refresh,
                         int64_t max_age_s) {
+    // Which service this catalogue belongs to, so the cache cannot be crossed
+    // with another provider's.
+    std::string want = client.config().provider_id;
+    if (want.empty()) want = "openrouter";
+    if (want != provider_id_) {
+        models_.clear();
+        by_id_.clear();
+        provider_id_ = want;
+    }
+
     if (!force_refresh && read_cache(max_age_s)) return true;
 
     std::string err;

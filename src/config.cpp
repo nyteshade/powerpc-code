@@ -1,5 +1,7 @@
 #include "config.hpp"
 
+#include <cctype>
+
 #include <cstdlib>
 #include <filesystem>
 
@@ -34,7 +36,23 @@ bool Config::use_provider(const std::string& id, bool model_was_explicit,
     // Only fill in what the user has not already decided. A --model or a
     // base_url in the config file must survive switching provider, or
     // overriding either becomes impossible.
-    if (!base_url_was_explicit) base_url = p->base_url;
+    // Precedence: an explicit --base-url, then a saved per-provider address,
+    // then an environment override, then the built-in default.
+    if (!base_url_was_explicit) {
+        base_url = p->base_url;
+
+        std::map<std::string, std::string>::const_iterator u =
+            provider_urls.find(p->id);
+        if (u != provider_urls.end() && !u->second.empty()) base_url = u->second;
+
+        // PPCODE_LMSTUDIO_URL, PPCODE_DEEPSEEK_URL, and so on.
+        std::string env_name = "PPCODE_";
+        for (size_t i = 0; i < p->id.size(); i++)
+            env_name += static_cast<char>(std::toupper(
+                static_cast<unsigned char>(p->id[i])));
+        env_name += "_URL";
+        if (const char* v = std::getenv(env_name.c_str()); v && *v) base_url = v;
+    }
     if (!model_was_explicit && !p->default_model.empty()) model = p->default_model;
 
     // Keys for every provider are resolved up front, so switching at runtime
@@ -111,6 +129,10 @@ Config Config::load(const std::string& explicit_path, std::vector<std::string>* 
             cfg.base_url      = jstr(j, "base_url", cfg.base_url);
             if (jptr(j, "model")) model_explicit = true;
             cfg.provider_id   = jstr(j, "provider_id", cfg.provider_id);
+            if (const json* pu = jptr(j, "provider_urls"); pu && pu->is_object())
+                for (auto it = pu->begin(); it != pu->end(); ++it)
+                    if (it.value().is_string())
+                        cfg.provider_urls[it.key()] = it.value().get<std::string>();
             cfg.system_prompt = jstr(j, "system_prompt", cfg.system_prompt);
             cfg.temperature   = jnum(j, "temperature", cfg.temperature);
             cfg.max_tokens    = static_cast<int>(jint(j, "max_tokens", cfg.max_tokens));
@@ -166,6 +188,7 @@ bool Config::save(std::string* error) const {
         json j;
         j["model"]              = model;
         j["provider_id"]        = provider_id;
+        if (!provider_urls.empty()) j["provider_urls"] = provider_urls;
         j["base_url"]           = base_url;
         j["system_prompt"]      = system_prompt;
         j["temperature"]        = temperature;

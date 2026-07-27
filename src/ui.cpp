@@ -1109,7 +1109,7 @@ void Tui::refresh_picker() {
     if (trim(picker_.query).empty()) {
         // With no query, lead with the favourites so the common choices are one
         // keystroke away rather than buried in 300+ entries.
-        for (const std::string& id : favorite_models())
+        for (const std::string& id : favorite_models(cfg_.provider_id))
             if (const ModelInfo* m = catalog_.find(id)) picker_.results.push_back(m);
         size_t favs = picker_.results.size();
         for (const ModelInfo* m : catalog_.search("", 400)) {

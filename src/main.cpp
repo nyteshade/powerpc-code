@@ -63,6 +63,7 @@ const char* kUsage =
     "  -m, --model ID           model to use, e.g. anthropic/claude-sonnet-4.5\n"
     "      --provider NAME      which service to talk to (default openrouter)\n"
     "      --providers          list known providers and exit\n"
+    "      --base-url URL       override the provider's address (saved per provider)\n"
     "  -C, --cwd DIR            working directory for tools\n"
     "  -c, --config PATH        config file (default ~/.config/ppcode/config.json)\n"
     "      --yolo               allow every tool without asking\n"
@@ -146,7 +147,7 @@ int main(int argc, char** argv) {
     bool want_print = false, want_selftest = false, want_net = false;
     bool want_list = false, want_write_config = false, want_help = false;
     bool want_version = false;
-    std::string provider_opt;
+    std::string provider_opt, base_url_opt;
     bool want_providers = false;
     bool yolo = false, quiet = false;
     bool refresh_env = false, no_knowledge = false, show_context = false;
@@ -200,6 +201,10 @@ int main(int argc, char** argv) {
         if (a == "-h" || a == "--help")            want_help = true;
         else if (a == "--version")                 want_version = true;
         else if (a == "--providers")               want_providers = true;
+        else if (starts_with(a, "--base-url="))    base_url_opt = a.substr(11);
+        else if (a == "--base-url") {
+            if (!take_value(argc, argv, &i, "--base-url", &base_url_opt)) return 2;
+        }
         else if (starts_with(a, "--provider="))    provider_opt = a.substr(11);
         else if (a == "--provider") {
             if (!take_value(argc, argv, &i, "--provider", &provider_opt)) return 2;
@@ -312,6 +317,13 @@ int main(int argc, char** argv) {
 
     // --provider is applied after the file so the flag wins, and before the
     // model override below so that -m still beats the provider's default.
+    if (!base_url_opt.empty()) {
+        // Remembered for this provider, so pointing at a LAN LM Studio is a
+        // one-time thing rather than a flag on every invocation.
+        cfg.provider_urls[provider_opt.empty() ? cfg.provider_id : provider_opt] =
+            base_url_opt;
+    }
+
     if (!provider_opt.empty()) {
         if (!cfg.use_provider(provider_opt, !model.empty(), false)) {
             std::fprintf(stderr,
@@ -319,6 +331,8 @@ int main(int argc, char** argv) {
                          provider_opt.c_str(), provider_id_list().c_str());
             return 2;
         }
+
+        if (!base_url_opt.empty()) cfg.base_url = base_url_opt;
 
         if (cfg.api_key.empty() && cfg.provider_info &&
             cfg.provider_info->needs_key) {

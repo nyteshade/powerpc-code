@@ -30,6 +30,12 @@ struct Config {
     std::string base_url = "https://openrouter.ai/api/v1";
     std::string api_key;              // never persisted to disk
 
+    // Per-provider base URLs. LM Studio is the reason this exists: it cannot
+    // run on a PowerPC G5, so it is always somewhere else on the network and
+    // its address is a property of the installation, not of the provider.
+    // Persisted, unlike the keys.
+    std::map<std::string, std::string> provider_urls;
+
     // Per-provider keys, so switching provider does not mean re-entering one.
     // Keyed by provider id. Never persisted; populated from the environment
     // and the key files.

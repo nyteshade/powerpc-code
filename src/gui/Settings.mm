@@ -125,6 +125,14 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 
 - (void)load:(id)sender;
 
+- (void)loadModelList;
+
+- (void)refreshProviderUI;
+
+- (void)providerChanged:(id)sender;
+
+- (void)providerURLChanged:(id)sender;
+
 - (NSView *)buildKeysTab;
 
 - (NSView *)buildModelTab;
@@ -217,7 +225,40 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
   CGFloat y = kPaneTop;
   CGFloat r;
 
+  // Which service, first: it decides what the model list below can contain.
   r = NextRow(&y, kPopupH, 0);
+  [v addSubview:MakeLabel(@"Provider:",
+                          NSMakeRect(20, Centred(r, kPopupH, kLabelH), 120, kLabelH),
+                          YES)];
+  providerPopup = [[[NSPopUpButton alloc]
+      initWithFrame:NSMakeRect(146, r, 200, kPopupH)] autorelease];
+  [providerPopup setTarget:self];
+  [providerPopup setAction:@selector(providerChanged:)];
+  [v addSubview:providerPopup];
+
+  providerStatus = MakeNote(@"", NSMakeRect(354, Centred(r, kPopupH, kLineH),
+                                            140, kLineH));
+  [v addSubview:providerStatus];
+
+  // The address is editable because LM Studio cannot run on this machine --
+  // it is always on another one, and which one is a property of the network,
+  // not of the provider.
+  r = NextRow(&y, kFieldH, 6);
+  [v addSubview:MakeLabel(@"Address:",
+                          NSMakeRect(20, Centred(r, kFieldH, kLabelH), 120, kLabelH),
+                          NO)];
+  providerURL = [[[NSTextField alloc]
+      initWithFrame:NSMakeRect(146, r, 344, kFieldH)] autorelease];
+  [providerURL setTarget:self];
+  [providerURL setAction:@selector(providerURLChanged:)];
+  [v addSubview:providerURL];
+
+  r = NextRow(&y, 2 * kLineH, 2);
+  [v addSubview:MakeNote(@"Blank restores the default. A key comes from the "
+                          "provider's environment variable or ~/.local/keys.",
+                         NSMakeRect(146, r, 350, 2 * kLineH))];
+
+  r = NextRow(&y, kPopupH, 10);
   [v addSubview:MakeLabel(@"Default model:",
                           NSMakeRect(20, Centred(r, kPopupH, kLabelH), 120, kLabelH),
                           YES)];
@@ -544,6 +585,104 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 
 // ---------------------------------------------------------------------------
 
+
+// The model list belongs to whichever provider is selected: its ids come from
+// that service's catalogue, and the favourites are the ones pinned for it.
+// Extracted so switching provider rebuilds it without reloading the whole pane.
+- (void)loadModelList {
+  [defaultModel removeAllItems];
+
+  NSArray *favs = [bridge favouriteModelIds];
+  NSEnumerator *fe = [favs objectEnumerator];
+  NSString *f;
+  while ((f = [fe nextObject]) != nil) [defaultModel addItemWithTitle:f];
+
+  NSArray *models = [bridge availableModels];
+  if ([models count] && [favs count])
+      [[defaultModel menu] addItem:[NSMenuItem separatorItem]];
+
+  // Alphabetical after the pinned ones, since a catalogue arrives in no order
+  // and hunting through a hundred ids is miserable.
+  NSMutableArray *rest = [NSMutableArray array];
+  NSEnumerator *me = [models objectEnumerator];
+  NSDictionary *m;
+  while ((m = [me nextObject]) != nil) {
+    NSString *mid = [m objectForKey:@"id"];
+    if (!mid || [favs containsObject:mid]) continue;
+    if (![[m objectForKey:@"tools"] boolValue]) continue;
+
+    [rest addObject:mid];
+  }
+  [rest sortUsingSelector:@selector(caseInsensitiveCompare:)];
+
+  NSEnumerator *re = [rest objectEnumerator];
+  NSString *mid;
+  int n = 0;
+  while ((mid = [re nextObject]) != nil) {
+    [defaultModel addItemWithTitle:mid];
+    if (++n >= 120) break;
+  }
+
+  NSString *cur = [bridge modelId];
+  if ([cur length] && [defaultModel itemWithTitle:cur])
+      [defaultModel selectItemWithTitle:cur];
+}
+
+- (void)refreshProviderUI {
+  NSString *current = [bridge providerId];
+  [providerPopup removeAllItems];
+
+  NSEnumerator *e = [[bridge availableProviders] objectEnumerator];
+  NSDictionary *p;
+  while ((p = [e nextObject]) != nil) {
+    [providerPopup addItemWithTitle:[p objectForKey:@"name"]];
+    // The id travels with the item, so the menu can show a human name without
+    // the action having to map back from it.
+    [[providerPopup lastItem] setRepresentedObject:[p objectForKey:@"id"]];
+
+    if ([[p objectForKey:@"id"] isEqualToString:current]) {
+      [providerPopup selectItem:[providerPopup lastItem]];
+
+      BOOL needs = [[p objectForKey:@"needsKey"] boolValue];
+      BOOL has = [[p objectForKey:@"hasKey"] boolValue];
+      [providerStatus setStringValue:!needs ? @"no key needed"
+                                            : (has ? @"key found" : @"NO KEY")];
+    }
+  }
+
+  [providerURL setStringValue:[bridge baseURLForProvider:current]];
+}
+
+- (void)providerChanged:(id)sender {
+  NSString *pid = [[providerPopup selectedItem] representedObject];
+  if (![pid length]) { return; }
+
+  if (![bridge setProviderId:pid]) {
+    [self refreshProviderUI];   // put the menu back
+    NSAlert *a = [[[NSAlert alloc] init] autorelease];
+    [a setMessageText:@"Could not switch provider."];
+    [a setInformativeText:@"A turn may still be running."];
+    [a addButtonWithTitle:@"OK"];
+    [a runModal];
+
+    return;
+  }
+
+  // The model list belongs to the provider, so it is rebuilt rather than left
+  // showing ids the new service would reject.
+  [self refreshProviderUI];
+  [self loadModelList];
+}
+
+- (void)providerURLChanged:(id)sender {
+  NSString *pid = [[providerPopup selectedItem] representedObject];
+  if (![pid length]) { return; }
+
+  [bridge setBaseURL:[providerURL stringValue] forProvider:pid];
+  [self refreshProviderUI];
+  [self loadModelList];
+}
+
 - (void)temperatureChanged:(id)sender {
   [temperatureLabel setStringValue:
       [NSString stringWithFormat:@"%.2f", [temperatureSlider doubleValue]]];
@@ -573,25 +712,8 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
   [tavilyKey setStringValue:Or([search objectForKey:@"tavily"], @"")];
   [braveKey setStringValue:Or([search objectForKey:@"brave"], @"")];
 
-  // Model list: favourites first, then everything that supports tools.
-  [defaultModel removeAllItems];
-  NSArray *favs = [bridge favouriteModelIds];
-  NSEnumerator *fe = [favs objectEnumerator];
-  NSString *f;
-  while ((f = [fe nextObject]) != nil) [defaultModel addItemWithTitle:f];
-  [[defaultModel menu] addItem:[NSMenuItem separatorItem]];
-  NSEnumerator *me = [[bridge availableModels] objectEnumerator];
-  NSDictionary *m;
-  int n = 0;
-  while ((m = [me nextObject]) != nil) {
-    NSString *mid = [m objectForKey:@"id"];
-    if ([favs containsObject:mid]) continue;
-    if (![[m objectForKey:@"tools"] boolValue]) continue;
-    [defaultModel addItemWithTitle:mid];
-    if (++n >= 120) break;
-  }
-  NSString *cur = [cfg objectForKey:@"model"];
-  if (cur && [defaultModel itemWithTitle:cur]) [defaultModel selectItemWithTitle:cur];
+  [self refreshProviderUI];
+  [self loadModelList];
 
   id tokens = OrObj([cfg objectForKey:@"max_tokens"], [NSNumber numberWithInt:8192]);
   id turns = OrObj([cfg objectForKey:@"max_turns"], [NSNumber numberWithInt:40]);
