@@ -35,26 +35,43 @@ usage() { sed -n '2,20p' "$0"; exit 2; }
 [ -n "$TARGET" ] || usage
 [ -d "$TARGET" ] || { echo "no such directory: $TARGET" >&2; exit 1; }
 
+# Arrays throughout, not space-separated strings. The bundle is called
+# "PowerPC Code.app", and a word-split list turns that into two nonexistent
+# paths -- otool then finds nothing, the script cheerfully reports "nothing to
+# bundle", and ships an application that dyld-errors on any machine without
+# MacPorts. It failed silently exactly once; hence the arrays and the check at
+# the end that at least one dependency was found.
+BINARIES=()
+
 case "$MODE" in
   --app)
     LIBDIR="$TARGET/Contents/Frameworks"
     # Contents/MacOS/x and Contents/Resources/ppcode are at the same depth, so
     # one relative token serves both.
     RELDIR="@executable_path/../Frameworks"
-    BINARIES="$(ls "$TARGET/Contents/MacOS" | sed "s|^|$TARGET/Contents/MacOS/|")"
+    for f in "$TARGET/Contents/MacOS"/*; do
+      [ -f "$f" ] && BINARIES+=("$f")
+    done
     if [ -f "$TARGET/Contents/Resources/ppcode" ]; then
-      BINARIES="$BINARIES $TARGET/Contents/Resources/ppcode"
+      BINARIES+=("$TARGET/Contents/Resources/ppcode")
     fi
     ;;
   --tree)
     LIBDIR="$TARGET/lib"
     RELDIR="@executable_path/../lib"
-    BINARIES="$(ls "$TARGET/bin" | sed "s|^|$TARGET/bin/|")"
+    for f in "$TARGET/bin"/*; do
+      [ -f "$f" ] && BINARIES+=("$f")
+    done
     ;;
   *)
     usage
     ;;
 esac
+
+if [ "${#BINARIES[@]}" -eq 0 ]; then
+  echo "no executables found in $TARGET" >&2
+  exit 1
+fi
 
 mkdir -p "$LIBDIR"
 
@@ -66,13 +83,15 @@ deps_of() {
 
 echo ">> collecting dependencies under $PREFIX"
 
-pending="$BINARIES"
+pending=("${BINARIES[@]}")
 collected=""
 
-while [ -n "$pending" ]; do
-  next=""
-  for bin in $pending; do
-    for dep in $(deps_of "$bin"); do
+while [ "${#pending[@]}" -gt 0 ]; do
+  next=()
+  for bin in "${pending[@]}"; do
+    deps=$(deps_of "$bin")
+    while IFS= read -r dep; do
+      [ -n "$dep" ] || continue
       base=$(basename "$dep")
 
       case " $collected " in
@@ -87,16 +106,23 @@ while [ -n "$pending" ]; do
       cp -f "$dep" "$LIBDIR/$base"
       chmod u+w "$LIBDIR/$base"
       collected="$collected $base"
-      next="$next $LIBDIR/$base"
+      next+=("$LIBDIR/$base")
       echo "   + $base"
-    done
+    done <<DEPS
+$deps
+DEPS
   done
-  pending="$next"
+  pending=("${next[@]}")
 done
 
+# Genuinely nothing to do is possible only if the binaries link nothing under
+# the prefix, which for this project never happens -- so treat it as the bug it
+# almost certainly is rather than exiting successfully.
 if [ -z "$collected" ]; then
-  echo ">> nothing to bundle"
-  exit 0
+  echo ">> FAILED: no dependencies found under $PREFIX." >&2
+  echo "   Either the binaries are already bundled, or the paths are wrong:" >&2
+  for bin in "${BINARIES[@]}"; do echo "     $bin" >&2; done
+  exit 1
 fi
 
 echo ">> rewriting install names"
@@ -107,18 +133,22 @@ for base in $collected; do
   "$INT" -id "$RELDIR/$base" "$LIBDIR/$base"
 done
 
-for bin in $BINARIES "$LIBDIR"/*; do
+for bin in "${BINARIES[@]}" "$LIBDIR"/*; do
   [ -f "$bin" ] || continue
 
-  for dep in $(deps_of "$bin"); do
+  deps=$(deps_of "$bin")
+  while IFS= read -r dep; do
+    [ -n "$dep" ] || continue
     "$INT" -change "$dep" "$RELDIR/$(basename "$dep")" "$bin"
-  done
+  done <<DEPS
+$deps
+DEPS
 done
 
 echo ">> verifying nothing still points at $PREFIX"
 
 leftover=0
-for bin in $BINARIES "$LIBDIR"/*; do
+for bin in "${BINARIES[@]}" "$LIBDIR"/*; do
   [ -f "$bin" ] || continue
 
   remaining=$(deps_of "$bin")

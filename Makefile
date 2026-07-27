@@ -45,7 +45,11 @@ GUI_DEPS  := $(GUI_OBJS:.o=.d)
 # Everything except main.cpp: the GUI supplies its own entry point.
 CORE_OBJS := $(filter-out build/main.o,$(OBJS))
 GUI_BIN   := build/ppcode-gui
-APP       := build/ppcode.app
+# The bundle is what the Finder shows, so it carries the human name. It has a
+# space in it, which make cannot express as a target -- hence `app` being a
+# recipe rather than a file rule, and every use of $(APP) being quoted.
+APP_NAME  := PowerPC Code
+APP       := build/$(APP_NAME).app
 
 .PHONY: all clean run install dirs lint gui app cli-dist
 
@@ -53,7 +57,6 @@ all: lint $(BIN)
 
 gui: lint $(GUI_BIN)
 
-app: $(APP)
 
 # This process ends up with two C++ runtimes (libcurl -> CoreServices ->
 # /usr/lib/libstdc++.6.dylib, alongside gcc15's). Darwin coalesces weak symbols
@@ -98,19 +101,19 @@ $(GUI_BIN): $(CORE_OBJS) $(GUI_OBJS)
 # with a name rather than as a bare executable.
 # The application carries the command line tool inside it, so the GUI can be the
 # thing that installs and updates the CLI.
-$(APP): $(GUI_BIN) $(BIN)
-	@rm -rf $(APP)
-	@mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
-	@cp $(GUI_BIN) $(APP)/Contents/MacOS/ppcode
-	@cp $(BIN) $(APP)/Contents/Resources/ppcode
-	@cp resources/ppcode.icns $(APP)/Contents/Resources/ppcode.icns
-	@printf '%s' 'APPL????' > $(APP)/Contents/PkgInfo
+app: $(GUI_BIN) $(BIN)
+	@rm -rf "$(APP)"
+	@mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
+	@cp $(GUI_BIN) "$(APP)/Contents/MacOS/ppcode"
+	@cp $(BIN) "$(APP)/Contents/Resources/ppcode"
+	@cp resources/ppcode.icns "$(APP)/Contents/Resources/ppcode.icns"
+	@printf '%s' 'APPL????' > "$(APP)/Contents/PkgInfo"
 	@printf '%s\n' \
 	  '<?xml version="1.0" encoding="UTF-8"?>' \
 	  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
 	  '<plist version="1.0"><dict>' \
-	  '  <key>CFBundleName</key><string>ppcode</string>' \
-	  '  <key>CFBundleDisplayName</key><string>ppcode</string>' \
+	  '  <key>CFBundleName</key><string>$(APP_NAME)</string>' \
+	  '  <key>CFBundleDisplayName</key><string>$(APP_NAME)</string>' \
 	  '  <key>CFBundleExecutable</key><string>ppcode</string>' \
 	  '  <key>CFBundleIconFile</key><string>ppcode</string>' \
 	  '  <key>CFBundleIdentifier</key><string>me.nyteshade.ppcode</string>' \
@@ -122,8 +125,8 @@ $(APP): $(GUI_BIN) $(BIN)
 	  '  <key>LSMinimumSystemVersion</key><string>10.5</string>' \
 	  '  <key>NSPrincipalClass</key><string>NSApplication</string>' \
 	  '  <key>NSHighResolutionCapable</key><false/>' \
-	  '</dict></plist>' > $(APP)/Contents/Info.plist
-	@sh scripts/bundle_dylibs.sh --app $(APP)
+	  '</dict></plist>' > "$(APP)/Contents/Info.plist"
+	@bash scripts/bundle_dylibs.sh --app "$(APP)"
 	@echo "built $(APP) ($(VERSION))"
 
 # A self-contained command line distribution: bin/ppcode plus the MacPorts
@@ -136,7 +139,7 @@ cli-dist: $(BIN)
 	@rm -rf $(CLIDIST)
 	@mkdir -p $(CLIDIST)/bin $(CLIDIST)/lib
 	@cp $(BIN) $(CLIDIST)/bin/ppcode
-	@sh scripts/bundle_dylibs.sh --tree $(CLIDIST)
+	@bash scripts/bundle_dylibs.sh --tree $(CLIDIST)
 	@cp scripts/cli_install.sh $(CLIDIST)/install.sh
 	@chmod +x $(CLIDIST)/install.sh
 	@printf '%s\n' \

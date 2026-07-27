@@ -1327,7 +1327,15 @@ static void buildMenuBar(id target) {
   NSMenu *bar = [[[NSMenu alloc] initWithTitle:@""] autorelease];
   [NSApp setMainMenu:bar];
 
-  NSString *appName = [[NSProcessInfo processInfo] processName];
+  // CFBundleName, not the process name. The executable is still called ppcode
+  // -- it is a unix binary and should be -- but the application is "PowerPC
+  // Code", and the About/Hide/Quit items have to say so. Falls back to the
+  // process name when running as a bare executable outside a bundle.
+  NSString *appName =
+      [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleName"];
+  if (![appName length]) {
+    appName = [[NSProcessInfo processInfo] processName];
+  }
 
   // --- Application ---------------------------------------------------------
   NSMenuItem *appItem = [bar addItemWithTitle:@"" action:NULL keyEquivalent:@""];
@@ -1579,6 +1587,40 @@ static BOOL writeViewPNG(NSView *view, NSString *path) {
   printf("  %-4s menu titles survive a UTF-8 round trip\n",
          badTitles == 0 ? "ok" : "FAIL");
   if (badTitles) failures++;
+
+  // The icon. A malformed .icns does not raise anything -- the Finder and the
+  // Dock quietly show a generic application instead -- so ask ImageIO whether
+  // it can actually decode the file, and at which sizes.
+  {
+    NSString *icon = [[NSBundle mainBundle] pathForResource:@"ppcode"
+                                                     ofType:@"icns"];
+    if (!icon) {
+      // Running as a bare executable rather than from a bundle: nothing to say.
+      printf("  --   not running from a bundle, icon not checked\n");
+    }
+
+    else {
+      NSImage *img = [[[NSImage alloc] initWithContentsOfFile:icon] autorelease];
+      NSArray *reps = img ? [img representations] : nil;
+      printf("  %-4s bundle icon decodes (%lu representations)\n",
+             [reps count] > 0 ? "ok" : "FAIL", (unsigned long)[reps count]);
+      if ([reps count] == 0) failures++;
+
+      NSEnumerator *re = [reps objectEnumerator];
+      NSImageRep *rep;
+      BOOL small = NO, large = NO;
+      while ((rep = [re nextObject]) != nil) {
+        NSInteger w = [rep pixelsWide];
+        if (w <= 32) small = YES;
+        if (w >= 128) large = YES;
+      }
+      // Both ends matter: the Dock uses the large sizes, the Finder list and
+      // the menu bar use the small ones.
+      printf("  %-4s icon has both small and large sizes\n",
+             (small && large) ? "ok" : "FAIL");
+      if (!(small && large)) failures++;
+    }
+  }
 
   // A model change has to rebuild the system message: it carries the model id,
   // the context window it was budgeted against, and whether images are usable.

@@ -95,9 +95,9 @@ fi
 # on a stock machine is worse than no release, so this covers all three
 # executables: the application, the tool inside it, and the standalone tool.
 echo ">> verifying every shipped binary is self-contained"
-for exe in build/ppcode.app/Contents/MacOS/ppcode \
-           build/ppcode.app/Contents/Resources/ppcode \
-           build/ppcode-cli/bin/ppcode; do
+for exe in "build/PowerPC Code.app/Contents/MacOS/ppcode" \
+           "build/PowerPC Code.app/Contents/Resources/ppcode" \
+           "build/ppcode-cli/bin/ppcode"; do
   if ssh "$HOST" "cd '$DEST' && /opt/local/bin/otool -L '$exe' | grep -q '/opt/local'"; then
     echo "$exe still links /opt/local; not releasing." >&2
     exit 1
@@ -119,7 +119,7 @@ CLI_TGZ="ppcode-$VERSION-ppc-macos10.5-cli.tar.gz"
 
 echo ">> packaging"
 ssh "$HOST" "cd '$DEST/build' && \
-  tar czf '$APP_TGZ' ppcode.app && \
+  tar czf '$APP_TGZ' 'PowerPC Code.app' && \
   tar czf '$CLI_TGZ' ppcode-cli"
 
 mkdir -p dist
