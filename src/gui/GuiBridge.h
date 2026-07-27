@@ -88,7 +88,9 @@ struct BridgeState;
 - (NSArray *)favouriteModelIds;
 
 - (NSString *)workingDirectory;
-- (void)setWorkingDirectory:(NSString *)dir;
+// Refused, returning NO, while a turn is running or if the path is not a
+// directory. The working directory is per conversation and is saved with it.
+- (BOOL)setWorkingDirectory:(NSString *)dir;
 
 - (BOOL)modelSupportsImages;
 

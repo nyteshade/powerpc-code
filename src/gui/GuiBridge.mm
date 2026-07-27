@@ -708,12 +708,24 @@ static ppcode::json ObjCToJson(id o) {
 
 - (NSString *)workingDirectory { return Str(st->agent->cwd()); }
 
-- (void)setWorkingDirectory:(NSString *)dir {
+- (BOOL)setWorkingDirectory:(NSString *)dir {
+  // Refused mid-turn. Tools read the agent's cwd for the whole of a run, and
+  // chdir() below is process-wide -- moving either underneath the worker thread
+  // is how a write lands somewhere nobody asked for.
+  if (st->busy.load()) return NO;
+
   std::string d = Cpp(dir);
-  if (chdir(d.c_str()) == 0) {
-    st->agent->set_cwd(d);
-    [self rebuildSystemPrompt];
-  }
+  std::error_code ec;
+  if (!std::filesystem::is_directory(d, ec)) return NO;
+
+  // The agent's cwd is what tools are actually given; the chdir is belt and
+  // braces for anything that resolves a relative path on its own.
+  if (chdir(d.c_str()) != 0) return NO;
+
+  st->agent->set_cwd(d);
+  [self rebuildSystemPrompt];
+
+  return YES;
 }
 
 - (NSArray *)transcript {

@@ -357,6 +357,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   NSTableView *sessionTable;
   NSArray *sessions;
   NSTextField *statusField;
+  NSButton *cwdButton;
   // The attachment strip, and the pieces whose frames it pushes around when it
   // appears and disappears.
   PPTokenRow *attachRow;
@@ -383,6 +384,8 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 - (void)archiveSession:(id)sender;
 - (void)deleteSession:(id)sender;
 - (void)clearAllConversations:(id)sender;
+- (void)chooseWorkingDirectory:(id)sender;
+- (void)refreshWorkingDirectory;
 - (void)afterRemovingSessionWasLoaded:(BOOL)wasLoaded message:(NSString *)message;
 - (void)presentProblem:(NSString *)text detail:(NSString *)detail;
 - (void)setStatus:(NSString *)text;
@@ -608,6 +611,8 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   const CGFloat kHeaderH = 38.0;
   const CGFloat kGap = 10.0;
   const CGFloat kSeamClear = 18.0;  // controls stay this far off the bottom seam
+  const CGFloat ctlH = 26.0;        // standard control height in the bottom strip
+  const CGFloat ctlY = kSeamClear;
 
   CGFloat contentTop = 640 - kHeaderH;
   CGFloat splitBottom = kBarH + kGap;
@@ -756,8 +761,19 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [content addSubview:mainSplit];
 
   // --- bottom bar ---------------------------------------------------------
+  // Which directory the tools will act in. It belongs on screen rather than
+  // buried in a menu: it is the answer to "where is this about to write?", and
+  // it is the scope every permission grant is measured against.
+  cwdButton = [[[NSButton alloc]
+      initWithFrame:NSMakeRect(kMargin, ctlY, 260, ctlH)] autorelease];
+  [cwdButton setBezelStyle:NSRoundedBezelStyle];
+  [cwdButton setFont:[NSFont systemFontOfSize:11.0]];
+  [cwdButton setTarget:self];
+  [cwdButton setAction:@selector(chooseWorkingDirectory:)];
+  [content addSubview:cwdButton];
+
   statusField = [[[NSTextField alloc]
-      initWithFrame:NSMakeRect(kMargin, kSeamClear + 4, 560, 18)]
+      initWithFrame:NSMakeRect(kMargin + 268, kSeamClear + 4, 300, 18)]
                     autorelease];
   [statusField setBezeled:NO];
   [statusField setDrawsBackground:NO];
@@ -776,8 +792,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   // Laid out from the right edge inward at HIG spacing: 20 from the window,
   // then 8 between related controls.
   CGFloat right = 940 - kMargin;
-  CGFloat sendW = 85, popupW = 190, ctlH = 26;
-  CGFloat ctlY = kSeamClear;
+  CGFloat sendW = 85, popupW = 190;
 
   sendButton = [[[NSButton alloc]
       initWithFrame:NSMakeRect(right - sendW, ctlY, sendW, ctlH)] autorelease];
@@ -805,6 +820,8 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [spinner setDisplayedWhenStopped:NO];
   [spinner setAutoresizingMask:NSViewMinXMargin];
   [content addSubview:spinner];
+
+  [self refreshWorkingDirectory];
 
   [window center];
   [window makeKeyAndOrderFront:nil];
@@ -982,9 +999,64 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 - (void)newConversation:(id)sender {
   if ([bridge isBusy]) return;
   [bridge newConversation];
+  [self refreshWorkingDirectory];
   [self clearTranscript];
   [self appendPlain:@"New conversation.\n\n"];
   [self reloadSessions];
+}
+
+// --- working directory ------------------------------------------------------
+
+// Shows the tail of the path, since the interesting part of
+// /Users/brie/Desktop/Sample is "Desktop/Sample" and the button is not wide
+// enough for the rest. The full path is the tooltip.
+- (void)refreshWorkingDirectory {
+  NSString *dir = [bridge workingDirectory];
+  if (![dir length]) { dir = @"(none)"; }
+
+  NSString *shown = [dir stringByAbbreviatingWithTildeInPath];
+  NSArray *parts = [shown pathComponents];
+  if ([parts count] > 3) {
+    shown = [NSString stringWithFormat:PPUTF8("\xE2\x80\xA6/%@/%@"),
+                [parts objectAtIndex:[parts count] - 2],
+                [parts lastObject]];
+  }
+
+  [cwdButton setTitle:shown];
+  [cwdButton setToolTip:
+      [NSString stringWithFormat:@"Working directory: %@\nClick to change.", dir]];
+}
+
+- (void)chooseWorkingDirectory:(id)sender {
+  if ([bridge isBusy]) {
+    [self setStatus:@"Finish the current turn before changing directory"];
+
+    return;
+  }
+
+  NSOpenPanel *panel = [NSOpenPanel openPanel];
+  [panel setCanChooseFiles:NO];
+  [panel setCanChooseDirectories:YES];
+  [panel setAllowsMultipleSelection:NO];
+  [panel setCanCreateDirectories:YES];
+  [panel setTitle:@"Working Directory"];
+  [panel setPrompt:@"Use"];
+
+  if ([panel runModalForDirectory:[bridge workingDirectory] file:nil] != NSOKButton) {
+    return;
+  }
+
+  NSString *chosen = [panel filename];
+  if (![bridge setWorkingDirectory:chosen]) {
+    [self presentProblem:@"Could not use that directory."
+                  detail:@"It may have been removed, or a turn is still running."];
+
+    return;
+  }
+
+  [self refreshWorkingDirectory];
+  [self appendPlain:[NSString stringWithFormat:@"\n[working directory: %@]\n\n",
+                        chosen]];
 }
 
 // --- conversation management ------------------------------------------------
@@ -1193,6 +1265,9 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   NSDictionary *s = [sessions objectAtIndex:(NSUInteger)row];
   if (![bridge loadSessionWithId:[s objectForKey:@"id"]]) return;
 
+  // The directory is saved with the conversation, so restoring one restores
+  // where its work was happening.
+  [self refreshWorkingDirectory];
   [self clearTranscript];
   NSEnumerator *te = [[bridge transcript] objectEnumerator];
   NSDictionary *m;
