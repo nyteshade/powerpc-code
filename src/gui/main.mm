@@ -348,7 +348,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
     [label setTextColor:[NSColor colorWithCalibratedWhite:0.78 alpha:1.0]];
     [[label cell] setWraps:YES];
     [label setAutoresizingMask:NSViewWidthSizable];
-    [label setStringValue:PPUTF8("Drop documents here\nto add them to search")];
+    [label setStringValue:PPUTF8("Drop documents here,\nor click to choose")];
     [self addSubview:label];
 
     bar = [[[NSProgressIndicator alloc]
@@ -395,7 +395,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   busy = NO;
   [bar stopAnimation:nil];
   [bar setHidden:YES];
-  [label setStringValue:PPUTF8("Drop documents here\nto add them to search")];
+  [label setStringValue:PPUTF8("Drop documents here,\nor click to choose")];
   [self setNeedsDisplay:YES];
 }
 
@@ -427,6 +427,15 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [self setNeedsDisplay:YES];
 
   return NSDragOperationCopy;
+}
+
+// Clicking is the same action as dropping. Some people reach for a file
+// chooser and some drag; the target for both is the same rectangle, so it
+// should accept both rather than growing a separate button.
+- (void)mouseDown:(NSEvent *)event {
+  if (busy) { return; }
+
+  [target performSelector:@selector(chooseDocumentsToIndex:) withObject:self];
 }
 
 - (void)draggingExited:(id<NSDraggingInfo>)sender {
@@ -530,6 +539,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 - (void)clearAllConversations:(id)sender;
 - (void)chooseWorkingDirectory:(id)sender;
 - (void)indexDroppedFiles:(NSArray *)paths;
+- (void)chooseDocumentsToIndex:(id)sender;
 - (void)showLibrary:(id)sender;
 - (void)reindexConversations:(id)sender;
 - (void)refreshWorkingDirectory;
@@ -931,6 +941,9 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
       initWithFrame:NSMakeRect(kMargin, ctlY, 260, ctlH)] autorelease];
   [cwdButton setBezelStyle:NSRoundedBezelStyle];
   [cwdButton setFont:[NSFont systemFontOfSize:11.0]];
+  [cwdButton setImage:[[NSWorkspace sharedWorkspace]
+                          iconForFile:NSHomeDirectory()]];
+  [cwdButton setImagePosition:NSImageLeft];
   [cwdButton setTarget:self];
   [cwdButton setAction:@selector(chooseWorkingDirectory:)];
   [content addSubview:cwdButton];
@@ -1193,6 +1206,27 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   }
 }
 
+- (void)chooseDocumentsToIndex:(id)sender {
+  if ([bridge isIndexing]) {
+    [self setStatus:@"Already indexing"];
+
+    return;
+  }
+
+  NSOpenPanel *panel = [NSOpenPanel openPanel];
+  [panel setCanChooseFiles:YES];
+  [panel setCanChooseDirectories:YES];
+  [panel setAllowsMultipleSelection:YES];
+  [panel setTitle:@"Add to Search Index"];
+  [panel setPrompt:@"Index"];
+
+  if ([panel runModalForDirectory:NSHomeDirectory() file:nil] != NSOKButton) {
+    return;
+  }
+
+  [self indexDroppedFiles:[panel filenames]];
+}
+
 - (void)reindexConversations:(id)sender {
   if ([bridge isIndexing]) {
     [self setStatus:@"Already indexing"];
@@ -1356,8 +1390,9 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   NSAlert *alert = [[[NSAlert alloc] init] autorelease];
   [alert setMessageText:[NSString stringWithFormat:@"Delete %@?",
                             [s objectForKey:@"title"]]];
-  [alert setInformativeText:@"This removes the saved conversation from disk. "
-                             "Archive keeps it instead."];
+  [alert setInformativeText:@"The conversation is moved to the Trash, so it can "
+                             "still be recovered from there. Archive keeps it in "
+                             "the sessions folder instead."];
   [alert addButtonWithTitle:@"Delete"];
   [alert addButtonWithTitle:@"Cancel"];
   [alert setAlertStyle:NSWarningAlertStyle];
@@ -1373,15 +1408,16 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
     return;
   }
 
-  [self afterRemovingSessionWasLoaded:wasLoaded message:@"Conversation deleted."];
+  [self afterRemovingSessionWasLoaded:wasLoaded message:@"Conversation moved to the Trash."];
 }
 
 - (void)clearAllConversations:(id)sender {
   NSAlert *alert = [[[NSAlert alloc] init] autorelease];
   [alert setMessageText:@"Delete every saved conversation?"];
   [alert setInformativeText:
-      [NSString stringWithFormat:@"All %lu conversations will be removed from "
-                                  "disk. This cannot be undone.",
+      [NSString stringWithFormat:@"All %lu conversations are moved to the Trash. "
+                                  "They can be recovered from there until it is "
+                                  "emptied.",
                                  (unsigned long)[sessions count]]];
   [alert addButtonWithTitle:@"Delete All"];
   [alert addButtonWithTitle:@"Cancel"];
@@ -1397,7 +1433,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 
   [self afterRemovingSessionWasLoaded:YES
                               message:[NSString stringWithFormat:
-                                          @"Deleted %ld conversations.", (long)n]];
+                                          @"Moved %ld conversations to the Trash.", (long)n]];
 }
 
 // Shared tail: the list is stale either way, and if the conversation on screen

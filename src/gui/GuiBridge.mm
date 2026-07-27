@@ -68,6 +68,54 @@ bool LoadSessionInto(ppcode::Agent *agent, const std::string &text,
   return agent->from_json(j, err);
 }
 
+
+// Move a file to the Trash rather than unlinking it.
+//
+// Deleting a conversation destroys work that cannot be reconstructed -- a
+// hundred-message session took a hundred exchanges to produce. The Finder has
+// had an undo for this since 1984 and there is no reason not to use it: the
+// conversation still leaves the application, but it is recoverable by anyone
+// who realises a moment later that they meant a different one.
+bool TrashFile(const std::filesystem::path &path, std::error_code *ec_out) {
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec)) return true;
+
+  const char *home = std::getenv("HOME");
+  if (!home || !*home) {
+    // No home to put it in; removing is still better than silently failing.
+    std::filesystem::remove(path, ec);
+    if (ec_out) *ec_out = ec;
+
+    return !ec;
+  }
+
+  std::filesystem::path trash = std::filesystem::path(home) / ".Trash";
+  std::filesystem::create_directories(trash, ec);
+
+  // The Trash is flat and a name can already be taken, so disambiguate rather
+  // than clobbering whatever is in there.
+  std::filesystem::path dest = trash / path.filename();
+  for (int n = 1; std::filesystem::exists(dest, ec) && n < 1000; n++) {
+    dest = trash / (path.stem().string() + " " + std::to_string(n) +
+                    path.extension().string());
+  }
+
+  std::filesystem::rename(path, dest, ec);
+  if (ec) {
+    // A rename fails across volumes; copy and unlink instead.
+    std::error_code ec2;
+    std::filesystem::copy_file(path, dest,
+                               std::filesystem::copy_options::overwrite_existing,
+                               ec2);
+    if (ec2) { if (ec_out) *ec_out = ec2; return false; }
+    std::filesystem::remove(path, ec2);
+  }
+
+  if (ec_out) ec_out->clear();
+
+  return true;
+}
+
 } // namespace
 
 // The C++ state, forward-declared in the header.
@@ -792,7 +840,7 @@ static ppcode::json ObjCToJson(id o) {
   if (current) *current = [self isCurrentSession:sessionId];
 
   std::error_code ec;
-  std::filesystem::remove(session::path_for(Cpp(sessionId)), ec);
+  TrashFile(session::path_for(Cpp(sessionId)), &ec);
   if (ec) {
     if (err) *err = [NSString stringWithUTF8String:ec.message().c_str()];
 
@@ -890,8 +938,7 @@ static ppcode::json ObjCToJson(id o) {
   }
 
   for (size_t i = 0; i < doomed.size(); i++) {
-    std::filesystem::remove(doomed[i], ec);
-    if (!ec) n++;
+    if (TrashFile(doomed[i], &ec)) n++;
   }
 
   return n;
