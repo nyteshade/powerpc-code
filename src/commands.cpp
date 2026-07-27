@@ -125,6 +125,7 @@ std::vector<Command> load(std::vector<std::string>* warnings) {
             // A command must not shadow a built-in, or /help becomes a lie.
             static const char* builtin[] = {
                 "help", "model", "models", "tools", "mcp", "env", "term", "jobs",
+                "index", "search",
                 "compact", "sessions", "cwd", "yolo", "unicode", "clear", "save",
                 "load", "cost", "quit", "exit", "undo", "changes", "todo"};
             bool clash = false;

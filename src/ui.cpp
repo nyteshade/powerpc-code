@@ -14,6 +14,7 @@
 #include "checkpoint.hpp"
 #include "commands.hpp"
 #include "session.hpp"
+#include "rag.hpp"
 #include "render.hpp"
 #include "utf8.hpp"
 
@@ -23,6 +24,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <filesystem>
 #include <thread>
 
 #include <langinfo.h>
@@ -995,6 +997,8 @@ bool Tui::handle_slash(const std::string& line) {
             "  /mcp            show connected MCP servers\n"
             "  /env [level]    show machine context, or set the detail level\n"
             "  /term           report what this terminal negotiated\n"
+            "  /index          index conversations and notes for search\n"
+            "  /search TEXT    search everything indexed\n"
             "  /jobs           list background jobs\n"
             "  /todo           show the current plan\n"
             "  /cwd [dir]      show or change the working directory\n"
@@ -1092,6 +1096,71 @@ bool Tui::handle_slash(const std::string& line) {
         }
         envinfo::Probe p = envinfo::probe(false);
         add(Kind::Info, envinfo::render(p, envinfo::Detail::Standard));
+        return true;
+    }
+    if (cmd == "/index") {
+        // Rebuilding is always safe: the JSON session files are the source of
+        // truth and this index is derived from them, so the recovery procedure
+        // for anything going wrong here is to run it again.
+        add(Kind::Info, "indexing conversations...");
+        refresh();
+
+        vec::Store store;
+        std::string err;
+        if (!store.open(vec::Store::default_path(), &err)) {
+            add(Kind::Error, "could not open the index: " + err);
+            return true;
+        }
+
+        rag::IndexStats st = rag::index_all_sessions(
+            store, [this](const std::string& m) { add(Kind::Info, "  " + m); });
+
+        // The platform notes are worth having in here too: they are the same
+        // material the system prompt draws on, and retrieval can reach more of
+        // it than a budget ever will.
+        std::string knowledge = "knowledge";
+        if (std::filesystem::exists(knowledge)) {
+            rag::IndexStats k =
+                rag::index_path(store, knowledge, rag::kKnowledge, nullptr);
+            st.documents += k.documents;
+        }
+
+        int64_t chunks = 0, embedded = 0;
+        store.stats(&chunks, &embedded, nullptr);
+
+        std::string msg = "indexed " + std::to_string(st.documents) +
+                          " documents, " + std::to_string(chunks) + " chunks";
+        if (embedded > 0) msg += " (" + std::to_string(embedded) + " embedded)";
+        if (st.skipped) msg += ", " + std::to_string(st.skipped) + " skipped";
+        if (!st.error.empty()) msg += "\nfirst error: " + st.error;
+        add(Kind::Info, msg);
+        return true;
+    }
+    if (cmd == "/search") {
+        if (trim(rest).empty()) {
+            add(Kind::Error, "usage: /search TEXT");
+            return true;
+        }
+
+        vec::Store store;
+        std::string err;
+        if (!store.open(vec::Store::default_path(), &err)) {
+            add(Kind::Error, "could not open the index: " + err);
+            return true;
+        }
+
+        std::vector<vec::Hit> hits = store.search_text(rest, 8);
+        if (hits.empty()) {
+            add(Kind::Info, "no matches. Have you run /index?");
+            return true;
+        }
+
+        std::string out;
+        for (size_t i = 0; i < hits.size(); i++) {
+            out += hits[i].doc_id + "\n";
+            out += "  " + elide(hits[i].text, 220) + "\n\n";
+        }
+        add(Kind::Info, out);
         return true;
     }
     if (cmd == "/term") {

@@ -23,6 +23,7 @@
 #include "tools.hpp"
 #include "xcodeproj.hpp"
 #include "utf8.hpp"
+#include "rag.hpp"
 #include "vecstore.hpp"
 #include "webtools.hpp"
 #include "xib.hpp"
@@ -1101,6 +1102,159 @@ void test_vecstore() {
     fs::remove_all(dir, ec);
 }
 
+
+// Chunking, which matters more than the retrieval algorithm: a chunk that
+// splits a question from its answer, or ends mid sentence, is one that comes
+// back useless no matter how good the ranking is.
+void test_rag() {
+    std::printf("[rag]\n");
+
+    // --- markdown ----------------------------------------------------------
+    {
+        std::string doc =
+            "# Bundling\n"
+            "\n"
+            "The closure is seventeen libraries deep.\n"
+            "\n"
+            "## Install names\n"
+            "\n"
+            "Rewritten to @executable_path so the bundle is self contained.\n";
+
+        auto chunks = rag::chunk_markdown(doc, "notes.md", 400, 0);
+        check(chunks.size() >= 2, "a heading starts a new chunk");
+
+        bool carries_title = true, carries_heading = false;
+        for (size_t i = 0; i < chunks.size(); i++) {
+            if (chunks[i].text.find("notes.md") == std::string::npos)
+                carries_title = false;
+            if (chunks[i].text.find("Install names") != std::string::npos)
+                carries_heading = true;
+        }
+        check(carries_title, "every chunk names its source document");
+        check(carries_heading, "every chunk carries its heading");
+    }
+    {
+        // A chunk must not end mid sentence, so a long run of paragraphs has to
+        // break on a paragraph gap.
+        std::string para = "This is a sentence of reasonable length here.\n\n";
+        std::string doc;
+        for (int i = 0; i < 40; i++) doc += para;
+
+        auto chunks = rag::chunk_markdown(doc, "long.md", 400, 40);
+        check(chunks.size() > 1, "a long document is split");
+
+        bool clean = true;
+        for (size_t i = 0; i < chunks.size(); i++) {
+            std::string t = trim(chunks[i].text);
+            if (!t.empty() && t[t.size() - 1] != '.') clean = false;
+        }
+        check(clean, "chunks end on a sentence boundary");
+
+        bool ordered = true;
+        for (size_t i = 0; i < chunks.size(); i++)
+            if (chunks[i].ordinal != static_cast<int>(i)) ordered = false;
+        check(ordered, "chunk ordinals are sequential");
+    }
+    {
+        auto chunks = rag::chunk_markdown("", "empty.md");
+        check(chunks.empty(), "an empty document yields no chunks");
+    }
+
+    // --- conversations -----------------------------------------------------
+    {
+        json s;
+        s["messages"] = json::array();
+        json u; u["role"] = "user";      u["content"] = "How do I bundle dylibs?";
+        json a; a["role"] = "assistant"; a["content"] = "Rewrite the install names.";
+        json t; t["role"] = "tool";      t["content"] = "tool noise nobody searches for";
+        json sy; sy["role"] = "system";  sy["content"] = "system prompt";
+        s["messages"].push_back(sy);
+        s["messages"].push_back(u);
+        s["messages"].push_back(a);
+        s["messages"].push_back(t);
+
+        auto chunks = rag::chunk_conversation(s, 4000);
+        check(chunks.size() == 1, "a short exchange is one chunk");
+        check(!chunks.empty() &&
+                  chunks[0].text.find("How do I bundle") != std::string::npos &&
+                  chunks[0].text.find("install names") != std::string::npos,
+              "the question stays with its answer");
+        check(!chunks.empty() &&
+                  chunks[0].text.find("tool noise") == std::string::npos &&
+                  chunks[0].text.find("system prompt") == std::string::npos,
+              "system and tool messages are not indexed");
+    }
+    {
+        // Content as an array of parts, which is how anything with an
+        // attachment arrives.
+        json s;
+        s["messages"] = json::array();
+        json m; m["role"] = "user";
+        m["content"] = json::array();
+        json part; part["type"] = "text"; part["text"] = "look at this screenshot";
+        m["content"].push_back(part);
+        s["messages"].push_back(m);
+
+        auto chunks = rag::chunk_conversation(s);
+        check(chunks.size() == 1 &&
+                  chunks[0].text.find("screenshot") != std::string::npos,
+              "multimodal content parts are indexed by their text");
+    }
+    {
+        json s;
+        s["messages"] = json::array();
+        check(rag::chunk_conversation(s).empty(), "no messages yields no chunks");
+    }
+
+    // --- end to end --------------------------------------------------------
+    {
+        // The database deliberately lives outside the tree being indexed. Put
+        // it inside and the walk finds index.db, plus its -wal and -shm, and
+        // counts them -- which is also a real hazard, not just a test artifact.
+        fs::path root = fs::temp_directory_path() / "ppcode-rag-test";
+        fs::path dir = root / "docs";
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        fs::create_directories(dir, ec);
+
+        std::string werr;
+        write_file_text((dir / "a.md").string(),
+                        "# Leopard icons\n\nic08 and ic09 must be JPEG 2000.\n",
+                        &werr);
+        write_file_text((dir / "b.md").string(),
+                        "# Stitching\n\nDrawn one stitch at a time.\n", &werr);
+        // Not indexable: must be counted as skipped, not stored as noise.
+        write_file_text((dir / "c.png").string(), "\x89PNG binary", &werr);
+
+        vec::Store store;
+        std::string err;
+        check(store.open((root / "index.db").string(), &err), "store opens");
+
+        rag::IndexStats st =
+            rag::index_path(store, dir.string(), rag::kReference, nullptr);
+        check(st.documents == 2, "two documents indexed");
+        check(st.skipped == 1, "the binary file is skipped");
+
+        auto hits = store.search_text("JPEG 2000", 5, rag::kReference);
+        check(!hits.empty() && hits[0].text.find("ic09") != std::string::npos,
+              "indexed documents are searchable");
+
+        // Re-indexing must replace, or every run doubles the corpus.
+        rag::index_path(store, dir.string(), rag::kReference, nullptr);
+        int64_t n = 0;
+        store.stats(&n, nullptr, nullptr);
+        check(n == 2, "re-indexing a directory replaces rather than duplicates");
+
+        std::string formatted = rag::format_hits(hits);
+        check(formatted.find("[1]") != std::string::npos &&
+                  formatted.find(".md") != std::string::npos,
+              "formatted hits carry provenance");
+
+        store.close();
+        fs::remove_all(root, ec);
+    }
+}
+
 void test_web() {
     std::printf("[web]\n");
     check(web::html_to_text("<p>Hello <b>world</b></p>").find("Hello") !=
@@ -1997,6 +2151,7 @@ int run_selftest(bool with_network) {
     test_render();
     test_mdparse();
     test_vecstore();
+    test_rag();
     test_web();
     test_plist_and_xcode();
     test_bundler();

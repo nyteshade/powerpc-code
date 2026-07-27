@@ -13,6 +13,7 @@
 #include "macgui.hpp"
 #include "mcp.hpp"
 #include "openrouter.hpp"
+#include "rag.hpp"
 #include "session.hpp"
 #include "subagent.hpp"
 #include "sysprompt.hpp"
@@ -134,6 +135,7 @@ struct BridgeState {
 
   st->tools.add_builtins();
   st->tools.add_extra_builtins(&st->todos);
+  rag::add_tools(st->tools);
   add_job_tools(st->tools, st->jobs);
   web::add_tools(st->tools, web::SearchConfig::from_env());
   xcode::add_tools(st->tools);

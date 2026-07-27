@@ -14,6 +14,7 @@
 #include "jobs.hpp"
 #include "mcp.hpp"
 #include "openrouter.hpp"
+#include "rag.hpp"
 #include "session.hpp"
 #include "subagent.hpp"
 #include "sysprompt.hpp"
@@ -165,8 +166,10 @@ int main(int argc, char** argv) {
             if (getcwd(buf, sizeof(buf))) self_dir = buf;
         }
         const char* candidates[] = {
-            "build/ppcode.app", "./ppcode.app",
-            "/Applications/ppcode.app",
+            "build/PowerPC Code.app", "./PowerPC Code.app",
+            "/Applications/PowerPC Code.app",
+            // The pre-0.5 name, so an older install still launches.
+            "build/ppcode.app", "./ppcode.app", "/Applications/ppcode.app",
         };
         std::string app;
         for (const char* c : candidates) {
@@ -177,7 +180,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,
                          "ppcode: the GUI application was not found.\n"
                          "Build it with:  gmake app\n"
-                         "then run:       open build/ppcode.app\n");
+                         "then run:       open \"build/PowerPC Code.app\"\n");
             return 2;
         }
         std::string cmd = "open " + app;
@@ -361,6 +364,7 @@ int main(int argc, char** argv) {
 
     tools.add_builtins();
     tools.add_extra_builtins(&todos);
+    rag::add_tools(tools);
     add_job_tools(tools, jobs);
     web::add_tools(tools, web::SearchConfig::from_env());
     xcode::add_tools(tools);
