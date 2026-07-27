@@ -1,71 +1,138 @@
-# ppcode
+<p align="center">
+  <img src="docs/icon.png" width="180" alt="PowerPC Code">
+</p>
 
-A Claude Code-style terminal coding assistant, written in C++23 and running
-natively on a PowerPC Power Mac G5 under Mac OS X Server 10.5.8 (Leopard).
+<h1 align="center">PowerPC Code</h1>
+
+<p align="center">
+  <em>A coding assistant that runs natively on a Power Mac G5, under Mac OS X 10.5 Leopard.</em>
+</p>
+
+<p align="center">
+  C++23 &middot; PowerPC &middot; Cocoa and ncurses &middot; no runtime dependencies
+</p>
+
+---
 
 It talks to any model on [OpenRouter](https://openrouter.ai), streams responses
-token by token, calls tools to read and write files and run commands, and
-speaks the Model Context Protocol.
+token by token, calls tools to read and write files and run commands, and speaks
+the Model Context Protocol — on hardware from 2005, with a toolchain that
+predates most of what modern tools assume.
 
+<p align="center">
+  <img src="docs/screenshot-window.png" width="900" alt="The Cocoa application">
+</p>
+
+## What you get
+
+Three front ends over one engine. `Agent` owns the model/tool loop and is
+front-end agnostic, so nothing is reimplemented between them.
+
+| | |
+| --- | --- |
+| **Cocoa application** | Skeuomorphic Aqua interface — tooled leather, ruled paper, saddle stitching, all drawn procedurally. Markdown transcript with syntax highlighting, conversation list, drag-and-drop attachments, settings, tool approval sheets. |
+| **Terminal interface** | ncurses, UTF-8, markdown and syntax highlighting, mouse scrolling, searchable model picker, mid-turn steering, sessions and context compaction. |
+| **Headless runner** | `-p` for one-shot, `--output json` or `stream-json`, job files, `--continue`. Fails safe: tools are refused unless granted. |
+
+Around thirty tools — files (including `multi_edit` and `read_many_files`),
+`bash`, structured build diagnostics, background jobs, web fetch and search,
+Apple documentation search, Xcode project and `.xib` manipulation, screenshots,
+application bundling with dylib relocation, subagents, and a todo store.
+
+MCP over stdio and HTTP, including Bearer-token authentication.
+
+## Download
+
+Both downloads are **self-contained** — they carry their own copies of libcurl
+and its TLS, HTTP/2, compression and IDN dependencies, ncurses, and the gcc15
+runtime. MacPorts is not required to run either one.
+
+Grab the latest from [Releases](https://github.com/nyteshade/powerpc-code/releases):
+
+- `ppcode-<version>-ppc-macos10.5-app.tar.gz` — the application
+- `ppcode-<version>-ppc-macos10.5-cli.tar.gz` — the terminal tool
+
+```sh
+tar xzf ppcode-*-cli.tar.gz
+./ppcode-cli/bin/ppcode --help
+./ppcode-cli/install.sh          # symlink onto your PATH
 ```
-  ppcode -- PowerPC Leopard build. /help for commands, Ctrl+D to quit.
-  model: anthropic/claude-sonnet-5    cwd: /Users/brie/src/ppcode    tools: 10
 
-> How many .cpp files are in src? Use your tools.
+The tool is linked rather than copied, because it finds its libraries relative to
+itself — keep the directory wherever you put it. The application installs its
+own copy the same way, from Settings.
 
-* glob  {"pattern": "src/**/*.cpp"}
+## Requirements
 
-    src/agent.cpp
-    src/common.cpp
-    ...
+- A PowerPC Mac running Mac OS X 10.5 Leopard
+- An [OpenRouter](https://openrouter.ai) API key
 
-There are 11 .cpp files in src.
-
-ready                                        anthropic/claude-sonnet-5  4322tok  $0.0092
->
-```
+To *build* from source you additionally need MacPorts `gcc15`, `curl`, `ncurses`
+and `gmake` — see [`scripts/macports_prereqs.sh`](scripts/macports_prereqs.sh).
 
 ## Building
 
 The G5 is the only machine with the toolchain, so builds happen there.
 
 ```sh
-gmake            # NOT /usr/bin/make -- gcc15 and GNU make both live in /opt/local
+gmake            # the terminal tool     -> build/ppcode
+gmake gui        # the Cocoa binary      -> build/ppcode-gui
+gmake app        # the application       -> "build/PowerPC Code.app"
+gmake cli-dist   # self-contained CLI    -> build/ppcode-cli
 gmake install    # -> ~/bin/ppcode
 ```
+
+Use `gmake`, not `/usr/bin/make`: gcc15 and GNU make both live in `/opt/local`.
 
 From another machine, `./deploy.sh` rsyncs the tree over and builds remotely:
 
 ```sh
 ./deploy.sh              # sync + build
 ./deploy.sh -c           # clean build
-./deploy.sh -r -p "hi"   # sync, build, then run with those arguments
+./deploy.sh -r -p "hi"   # sync, build, run
 ```
 
-Requirements, all present via MacPorts: `gcc15` (15.2.0, for C++23), `curl`,
-`ncurses`, `gmake`. `nlohmann/json` is vendored in `third_party/`.
+Releases are cut with [`scripts/release.sh`](scripts/release.sh), which will not
+publish unless the self-test passes, the interface check passes, and every
+shipped binary is provably free of `/opt/local` references.
 
 ## The Cocoa application
 
 ```sh
-gmake app          # build build/ppcode.app
-ppcode gui         # or just: open build/ppcode.app
+gmake app
+open "build/PowerPC Code.app"
 ```
 
-A real Aqua application in front of the same engine — Objective-C++ lets the
-controller hold the C++ agent directly, so nothing is reimplemented. Source list
-of past conversations, split view with transcript over composer, drag files or
-images straight into the composer, model picker, tool approval as an alert.
-Return sends, Option-Return inserts a newline, and typing while a turn runs
-steers it just as in the terminal.
+<p align="center">
+  <img src="docs/screenshot-settings.png" width="620" alt="Settings">
+</p>
 
-`./build/ppcode-gui --check` builds the window, walks the view hierarchy and
-reports what it found — verification that works on a machine whose display is
-asleep, where a screenshot would only prove the screen is black.
+A real Aqua application in front of the same engine — Objective-C++ lets the
+controller hold the C++ agent directly. Conversation list with archive, delete
+and JSONL export; transcript over composer in a split view; drag files or images
+straight into the composer; model picker; tool approval as a sheet. Return sends,
+Shift-Return inserts a newline, and typing while a turn runs steers it just as in
+the terminal.
+
+Verification without a working display, which matters on a machine whose screen
+is usually asleep:
+
+```sh
+./build/ppcode-gui --check          # builds the window, walks the view tree,
+                                    # checks menu wiring, icon and UTF-8 titles
+./build/ppcode-gui --shot ~/shots   # the app screenshots itself, offscreen
+```
+
+`screencapture` is useless over SSH here — it returns a uniformly black frame
+whether or not the display is awake — so the application draws itself into a
+bitmap instead. That needs no display, no root, and never touches the
+accessibility API.
 
 Building Objective-C++ with GCC here has real constraints — no fast enumeration,
-a compiler crash on any C++ catch clause, fragile-ABI ivar placement — all
-documented in `knowledge/60-objcpp-gcc.md`.
+a compiler crash on any C++ catch clause, fragile-ABI ivar placement, lambda
+capture lists parsed as message sends, and non-ASCII string literals arriving as
+garbage — all documented in
+[`knowledge/60-objcpp-gcc.md`](knowledge/60-objcpp-gcc.md).
 
 ## Setup
 
@@ -413,16 +480,16 @@ HTTP path locally.
 ## Testing
 
 ```sh
-./build/ppcode --selftest         # 352 offline checks
+./build/ppcode --selftest         # 451 offline checks
 ./build/ppcode --selftest --net   # adds live OpenRouter calls
 ```
 
 Covers SSE framing at every chunk boundary, streaming tool-call assembly,
 message serialisation, the shell timeout, every builtin tool, the approval gate,
 the YAML and job-file parsers, UTF-8 width and boundary handling, markdown and
-syntax highlighting, HTML-to-text, attachment loading and degradation, the
-environment probe's detail scaling, and a full pbxproj parse/mutate/reload
-round-trip. `scripts/tui_drive.py` runs the TUI inside a pty and renders the
+syntax highlighting, the markdown document model behind the Cocoa transcript,
+HTML-to-text, attachment loading and degradation, the environment probe's detail
+scaling, and a full pbxproj parse/mutate/reload round-trip. `scripts/tui_drive.py` runs the TUI inside a pty and renders the
 screen, so the interface can be regression-tested without a human at the
 keyboard:
 
@@ -516,6 +583,7 @@ src/
   mcp.*         MCP client: stdio and HTTP transports
   agent.*       the model/tool loop, shared by both front ends
   utf8.*        codepoint and display-width aware string handling
+  mdparse.*     markdown structure, front-end agnostic
   render.*      markdown and syntax highlighting into styled spans
   ui.*          ncurses interface
   headless.*    non-interactive runner
@@ -524,5 +592,9 @@ knowledge/*.md                   platform knowledge loaded into context
 examples/jobs/*.md               example job files
 examples/qjs-mcp-server.js       MCP server for QuickJS
 scripts/tui_drive.py             pty harness for testing the TUI
+scripts/bundle_dylibs.sh         makes a build self-contained
+scripts/make_icns.py             builds the application icon
+scripts/release.sh               cuts and publishes a release
+art/, resources/, docs/          icon source, the .icns, and README images
 scripts/http_mcp_test_server.py  HTTP MCP fixture
 ```
