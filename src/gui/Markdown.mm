@@ -24,7 +24,46 @@ static const CGFloat kListIndent = 18.0;    // per nesting level
 static const CGFloat kListHang = 16.0;      // marker column width
 static const CGFloat kCodeIndent = 20.0;
 static const CGFloat kQuoteIndent = 16.0;   // per quote level
-static const CGFloat kParaSpacing = 7.0;
+
+CGFloat PPMarkdownLineHeight(void) {
+  static CGFloat cached = 0.0;
+  if (cached > 0.0) { return cached; }
+
+  NSLayoutManager *lm = [[[NSLayoutManager alloc] init] autorelease];
+  cached = [lm defaultLineHeightForFont:[NSFont systemFontOfSize:kBodySize]];
+  if (cached < 4.0) { cached = 15.0; }
+
+  return cached;
+}
+
+CGFloat PPMarkdownBaselineOffset(void) {
+  static CGFloat cached = 0.0;
+  if (cached > 0.0) { return cached; }
+
+  NSLayoutManager *lm = [[[NSLayoutManager alloc] init] autorelease];
+  cached = [lm defaultBaselineOffsetForFont:[NSFont systemFontOfSize:kBodySize]];
+  if (cached < 2.0) { cached = 12.0; }
+
+  return cached;
+}
+
+// A blank ruled line between paragraphs, rather than an arbitrary gap: keeping
+// the spacing a whole multiple of the line height is what keeps every body line
+// landing on a rule.
+static CGFloat ParaSpacing(void) { return PPMarkdownLineHeight(); }
+
+// Lock a paragraph to a whole number of body lines.
+//
+// This is what actually makes ruled paper work. Aligning the rules to the body
+// font is not enough on its own: a heading, a code block or a table has its own
+// line height, so everything after one lands at some arbitrary offset and the
+// rules cut through it. Forcing every line to a multiple of the same unit keeps
+// the whole transcript on one baseline grid, whatever is in it.
+static void LockToGrid(NSMutableParagraphStyle *p, int lines) {
+  CGFloat h = PPMarkdownLineHeight() * (lines > 0 ? lines : 1);
+  [p setMinimumLineHeight:h];
+  [p setMaximumLineHeight:h];
+}
 
 NSString *PPUTF8(const char *utf8) {
   NSString *s = [NSString stringWithUTF8String:utf8];
@@ -127,7 +166,8 @@ static NSColor *CodeColorForStyle(render::Style s) {
 NSDictionary *PPMarkdownStreamAttributes(void) {
   NSMutableParagraphStyle *p =
       [[[NSMutableParagraphStyle alloc] init] autorelease];
-  [p setParagraphSpacing:kParaSpacing];
+  [p setParagraphSpacing:ParaSpacing()];
+  LockToGrid(p, 1);
 
   return [NSDictionary dictionaryWithObjectsAndKeys:
              BodyFont(), NSFontAttributeName,
@@ -246,7 +286,8 @@ static NSMutableParagraphStyle *BaseStyle(int quote) {
   CGFloat q = quote * kQuoteIndent;
   [p setFirstLineHeadIndent:q];
   [p setHeadIndent:q];
-  [p setParagraphSpacing:kParaSpacing];
+  [p setParagraphSpacing:ParaSpacing()];
+  LockToGrid(p, 1);
 
   return p;
 }
@@ -264,8 +305,9 @@ static void EmitHeading(NSMutableAttributedString *out, const Node &n) {
   else if (n.level == 3) { size = 13.0; }
 
   NSMutableParagraphStyle *p = BaseStyle(n.quote);
-  [p setParagraphSpacingBefore:(n.level <= 2 ? 14.0 : 10.0)];
-  [p setParagraphSpacing:4.0];
+  [p setParagraphSpacingBefore:PPMarkdownLineHeight()];
+  [p setParagraphSpacing:0.0];
+  LockToGrid(p, n.level <= 2 ? 2 : 1);
 
   NSFont *font = [NSFont boldSystemFontOfSize:size];
   AppendRuns(out, n.runs, font, Rgb(0x10, 0x10, 0x28), p);
@@ -299,7 +341,8 @@ static void EmitList(NSMutableAttributedString *out, const Node &n) {
       [[[NSMutableParagraphStyle alloc] init] autorelease];
   [p setFirstLineHeadIndent:base];
   [p setHeadIndent:base + kListHang];
-  [p setParagraphSpacing:3.0];
+  [p setParagraphSpacing:0.0];
+  LockToGrid(p, 1);
   // A single tab stop at the hanging indent turns "marker\ttext" into a proper
   // hanging indent, so wrapped lines align under the text and not the marker.
   [p setTabStops:[NSArray array]];
@@ -363,6 +406,7 @@ static void EmitCode(NSMutableAttributedString *out, const Node &n) {
       [[[NSMutableParagraphStyle alloc] init] autorelease];
   [p setFirstLineHeadIndent:indent];
   [p setHeadIndent:indent];
+  LockToGrid(p, 1);
 
   NSMutableParagraphStyle *first = [[p mutableCopy] autorelease];
   [first setParagraphSpacingBefore:6.0];
@@ -446,6 +490,7 @@ static size_t EmitTable(NSMutableAttributedString *out,
   [p setFirstLineHeadIndent:indent];
   [p setHeadIndent:indent];
   [p setLineBreakMode:NSLineBreakByClipping];
+  LockToGrid(p, 1);
 
   NSFont *mono = MonoFont();
   NSFont *bold = [[NSFontManager sharedFontManager] convertFont:mono

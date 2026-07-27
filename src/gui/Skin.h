@@ -69,8 +69,25 @@
 @end
 
 // A view that fills itself with ruled writing paper.
+//
+// The ruling has to be told the pitch and phase of the text it sits under, or
+// the lines land wherever they like and the effect reads as a printed
+// background rather than as paper someone is writing on. See
+// -setRulePitch:phase:.
 @interface PPPaperView : NSView {
   BOOL ruled;
+  CGFloat rulePitch;
+  CGFloat rulePhase;
+  CGFloat marginX;
 }
+
 - (void)setRuled:(BOOL)r;
+
+// pitch: distance between rules, i.e. one line of body text.
+// phase: distance from the top of the view down to the first rule.
+- (void)setRulePitch:(CGFloat)pitch phase:(CGFloat)phase;
+
+// x of the red margin rule, or 0 for none.
+- (void)setMarginX:(CGFloat)x;
+
 @end

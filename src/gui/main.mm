@@ -22,10 +22,84 @@
 #include <string.h>
 
 // ---------------------------------------------------------------------------
+// A text view written on paper.
+//
+// The paper is drawn by the text view rather than by a view behind it, for two
+// reasons. The rules have to line up with the writing, and the text view is the
+// only thing that knows where its lines are -- a backdrop cannot follow, because
+// the text scrolls over it and the alignment would survive exactly one
+// scrollwheel click. And anchoring the pattern phase to the view rather than the
+// window is what stops the tile seams reappearing as the view scrolls.
+// ---------------------------------------------------------------------------
+
+@interface PPPaperTextView : NSTextView {
+  BOOL ruled;
+}
+
+- (void)setRuled:(BOOL)r;
+
+@end
+
+@implementation PPPaperTextView
+
+- (id)initWithFrame:(NSRect)f {
+  if ((self = [super initWithFrame:f])) { ruled = NO; }
+
+  return self;
+}
+
+- (void)setRuled:(BOOL)r {
+  ruled = r;
+  [self setNeedsDisplay:YES];
+}
+
+- (void)drawRect:(NSRect)dirty {
+  NSRect b = [self bounds];
+
+  // Pattern phase in window coordinates, so the tile is pinned to this view and
+  // scrolling does not shuffle it.
+  [[NSGraphicsContext currentContext]
+      setPatternPhase:[self convertPoint:NSZeroPoint toView:nil]];
+  [[PPSkin paperColor] set];
+  NSRectFill(dirty);
+
+  if (ruled) {
+    // One rule per line of body text, placed just under the baseline so the
+    // writing sits on the line. Ruling on the line *height* instead put the
+    // rule through the middle of the letters. A text view is flipped, so this
+    // counts downward from the top inset.
+    CGFloat pitch = PPMarkdownLineHeight();
+    CGFloat top = [self textContainerInset].height + PPMarkdownBaselineOffset() + 1.0;
+
+    [[PPSkin ruleColor] set];
+    for (CGFloat y = top; y < NSMaxY(b); y += pitch) {
+      NSRect line = NSMakeRect(NSMinX(b), floor(y) + 0.5, NSWidth(b), 1.0);
+      if (NSIntersectsRect(line, dirty)) {
+        NSRectFillUsingOperation(line, NSCompositeSourceOver);
+      }
+    }
+
+    // The margin sits just left of where the text begins.
+    CGFloat mx = floor([self textContainerInset].width - 10.0) + 0.5;
+    NSRect margin = NSMakeRect(mx, NSMinY(b), 1.0, NSHeight(b));
+    if (mx > NSMinX(b) && NSIntersectsRect(margin, dirty)) {
+      [[PPSkin marginRuleColor] set];
+      NSRectFillUsingOperation(margin, NSCompositeSourceOver);
+    }
+  }
+
+  [super drawRect:dirty];
+}
+
+- (BOOL)isOpaque { return YES; }
+
+@end
+
+// ---------------------------------------------------------------------------
 // A text view that accepts dropped files and images.
 // ---------------------------------------------------------------------------
 
-@interface PPComposer : NSTextView {
+@interface PPComposer : PPPaperTextView {
   NSMutableArray *attachments;
   id dropTarget;
 }
@@ -470,9 +544,24 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [content setStitched:YES];
   [window setContentView:content];
 
+  // Aqua metrics: a 20-point window margin, 12 between groups, 8 between
+  // related controls. Beyond the HIG, the margin is what the leather is *for* --
+  // with the content running to the edges there was nowhere for the stitching to
+  // sit, and it was drawn underneath the panels where nobody could see it.
+  const CGFloat kMargin = 18.0;   // leather visible around the content
+  const CGFloat kBarH = 38.0;     // bottom control strip
+  const CGFloat kHeaderH = 34.0;
+  const CGFloat kGap = 10.0;
+
+  CGFloat contentTop = 640 - kHeaderH;
+  CGFloat splitBottom = kBarH + kGap;
+  CGFloat splitHeight = contentTop - kGap - splitBottom;
+  CGFloat splitWidth = 940 - 2 * kMargin;
+
   // --- header band ---------------------------------------------------------
   PPTitleView *header =
-      [[[PPTitleView alloc] initWithFrame:NSMakeRect(0, 610, 940, 30)] autorelease];
+      [[[PPTitleView alloc]
+          initWithFrame:NSMakeRect(0, contentTop, 940, kHeaderH)] autorelease];
   [header setStitched:NO];
   [header setDark:YES];
   [header setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
@@ -497,11 +586,16 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
       [[[NSTableColumn alloc] initWithIdentifier:@"title"] autorelease];
   [[col headerCell] setStringValue:@"Conversations"];
   [col setWidth:196];
+  [col setResizingMask:NSTableColumnAutoresizingMask];
   [sessionTable addTableColumn:col];
+  [sessionTable setColumnAutoresizingStyle:NSTableViewUniformColumnAutoresizingStyle];
   [sessionTable setDataSource:self];
   [sessionTable setDelegate:self];
   [sessionTable setUsesAlternatingRowBackgroundColors:NO];
-  [sessionTable setRowHeight:32.0];
+  // Two lines of type need room for two lines of type. At 32 the second line
+  // was being cut through the middle.
+  [sessionTable setRowHeight:40.0];
+  [sessionTable setIntercellSpacing:NSMakeSize(3.0, 4.0)];
   [listScroll setDocumentView:sessionTable];
 
   // --- right: transcript over composer ------------------------------------
@@ -516,8 +610,9 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [transScroll setDrawsBackground:NO];
   [transScroll setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
-  transcript = [[[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 700, 430)]
+  transcript = [[[PPPaperTextView alloc] initWithFrame:NSMakeRect(0, 0, 700, 430)]
                    autorelease];
+  [(PPPaperTextView *)transcript setRuled:YES];
   [transcript setEditable:NO];
   [transcript setRichText:YES];
   [transcript setAutoresizingMask:NSViewWidthSizable];
@@ -529,7 +624,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 
   PPWellView *transWell =
       WrapInPaperWell(transScroll, NSMakeRect(0, 0, 720, 440),
-                      NSViewWidthSizable | NSViewHeightSizable, YES);
+                      NSViewWidthSizable | NSViewHeightSizable, NO);
 
   compScroll =
       [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 700, 110)] autorelease];
@@ -567,8 +662,9 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [rightSplit addSubview:compWell];
   [rightSplit setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
-  NSSplitView *mainSplit =
-      [[[NSSplitView alloc] initWithFrame:NSMakeRect(0, 30, 940, 580)] autorelease];
+  NSSplitView *mainSplit = [[[NSSplitView alloc]
+      initWithFrame:NSMakeRect(kMargin, splitBottom, splitWidth, splitHeight)]
+                                autorelease];
   [mainSplit setVertical:YES];
   [mainSplit setDividerStyle:NSSplitViewDividerStyleThin];
 
@@ -582,7 +678,8 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [content addSubview:mainSplit];
 
   // --- bottom bar ---------------------------------------------------------
-  statusField = [[[NSTextField alloc] initWithFrame:NSMakeRect(230, 6, 380, 18)]
+  statusField = [[[NSTextField alloc]
+      initWithFrame:NSMakeRect(kMargin, (kBarH - 18) / 2, 560, 18)]
                     autorelease];
   [statusField setBezeled:NO];
   [statusField setDrawsBackground:NO];
@@ -598,22 +695,14 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   // tokens above the composer now, which is both more informative and the only
   // way to drop one file without clearing the lot.
 
-  spinner = [[[NSProgressIndicator alloc] initWithFrame:NSMakeRect(618, 6, 16, 16)]
-                autorelease];
-  [spinner setStyle:NSProgressIndicatorSpinningStyle];
-  [spinner setControlSize:NSSmallControlSize];
-  [spinner setDisplayedWhenStopped:NO];
-  [content addSubview:spinner];
+  // Laid out from the right edge inward at HIG spacing: 20 from the window,
+  // then 8 between related controls.
+  CGFloat right = 940 - kMargin;
+  CGFloat sendW = 85, popupW = 190, ctlH = 26;
+  CGFloat ctlY = (kBarH - ctlH) / 2;
 
-  modelPopup = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(645, 3, 190, 24)]
-                   autorelease];
-  [modelPopup setAutoresizingMask:NSViewMinXMargin];
-  [modelPopup setTarget:self];
-  [modelPopup setAction:@selector(modelChanged:)];
-  [content addSubview:modelPopup];
-
-  sendButton = [[[NSButton alloc] initWithFrame:NSMakeRect(845, 3, 85, 24)]
-                   autorelease];
+  sendButton = [[[NSButton alloc]
+      initWithFrame:NSMakeRect(right - sendW, ctlY, sendW, ctlH)] autorelease];
   [sendButton setTitle:@"Send"];
   [sendButton setBezelStyle:NSRoundedBezelStyle];   // the glossy Aqua capsule
   [sendButton setKeyEquivalent:@"\r"];              // default button, pulses
@@ -621,6 +710,23 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [sendButton setAction:@selector(send:)];
   [sendButton setAutoresizingMask:NSViewMinXMargin];
   [content addSubview:sendButton];
+
+  modelPopup = [[[NSPopUpButton alloc]
+      initWithFrame:NSMakeRect(right - sendW - 8 - popupW, ctlY, popupW, ctlH)]
+                   autorelease];
+  [modelPopup setAutoresizingMask:NSViewMinXMargin];
+  [modelPopup setTarget:self];
+  [modelPopup setAction:@selector(modelChanged:)];
+  [content addSubview:modelPopup];
+
+  spinner = [[[NSProgressIndicator alloc]
+      initWithFrame:NSMakeRect(right - sendW - 8 - popupW - 8 - 16,
+                               (kBarH - 16) / 2, 16, 16)] autorelease];
+  [spinner setStyle:NSProgressIndicatorSpinningStyle];
+  [spinner setControlSize:NSSmallControlSize];
+  [spinner setDisplayedWhenStopped:NO];
+  [spinner setAutoresizingMask:NSViewMinXMargin];
+  [content addSubview:spinner];
 
   [window center];
   [window makeKeyAndOrderFront:nil];
@@ -807,9 +913,38 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
                           row:(NSInteger)row {
   NSDictionary *s = [sessions objectAtIndex:(NSUInteger)row];
 
-  return [NSString stringWithFormat:PPUTF8("%@\n%@ \xC2\xB7 %@ msg"),
-                   [s objectForKey:@"title"], [s objectForKey:@"age"],
-                   [s objectForKey:@"messages"]];
+  // Two lines with a clear hierarchy: the title in ink, the age and count
+  // smaller and faded beneath it. As one plain string in one font the two ran
+  // together and the list was hard to read at a glance.
+  NSMutableParagraphStyle *p =
+      [[[NSMutableParagraphStyle alloc] init] autorelease];
+  [p setLineBreakMode:NSLineBreakByTruncatingTail];
+
+  NSDictionary *titleAttrs = [NSDictionary dictionaryWithObjectsAndKeys:
+      [NSFont boldSystemFontOfSize:11.0], NSFontAttributeName,
+      [PPSkin inkColor], NSForegroundColorAttributeName,
+      p, NSParagraphStyleAttributeName, nil];
+  NSDictionary *metaAttrs = [NSDictionary dictionaryWithObjectsAndKeys:
+      [NSFont systemFontOfSize:9.0], NSFontAttributeName,
+      [PPSkin fadedInkColor], NSForegroundColorAttributeName,
+      p, NSParagraphStyleAttributeName, nil];
+
+  NSString *title = [s objectForKey:@"title"];
+  if (![title length]) { title = @"(untitled)"; }
+
+  NSMutableAttributedString *out =
+      [[[NSMutableAttributedString alloc] init] autorelease];
+  [out appendAttributedString:
+      [[[NSAttributedString alloc] initWithString:title
+                                       attributes:titleAttrs] autorelease]];
+  [out appendAttributedString:
+      [[[NSAttributedString alloc]
+          initWithString:[NSString stringWithFormat:PPUTF8("\n%@ \xC2\xB7 %@ msg"),
+                             [s objectForKey:@"age"],
+                             [s objectForKey:@"messages"]]
+              attributes:metaAttrs] autorelease]];
+
+  return out;
 }
 
 - (void)tableViewSelectionDidChange:(NSNotification *)note {

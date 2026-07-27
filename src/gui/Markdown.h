@@ -13,6 +13,17 @@
 // Render a whole markdown document.
 NSAttributedString *PPAttributedFromMarkdown(const std::string &md);
 
+// One line of body text: the vertical rhythm the whole transcript is set on.
+//
+// Paragraph spacing is a whole multiple of it, so successive paragraphs stay on
+// the same grid, which is what lets ruled paper line up with the writing.
+CGFloat PPMarkdownLineHeight(void);
+
+// Distance from the top of a line of body text down to its baseline. Ruled
+// paper needs it: a rule belongs just under the baseline, where the writing
+// sits on it, not through the middle of the letters.
+CGFloat PPMarkdownBaselineOffset(void);
+
 // Attributes for text that has arrived but whose block has not closed yet.
 // Streaming appends runs of this and only re-renders once a block completes,
 // so a code block is highlighted once rather than once per token.

@@ -71,6 +71,72 @@ double smooth_noise(double x, double y, int period) {
   return smooth_noise(x, y, period, period);
 }
 
+// One stitch, centred on `c` and running along (ux, uy).
+//
+// Built from four passes, because that is what separates thread from a dash:
+// the hole the thread passes through, a shadow cast into it, the thread itself
+// leaning across the seam, and a highlight along the lit top edge. The lean
+// alternates so consecutive stitches slope opposite ways, which is what a
+// two-needle saddle stitch actually does.
+void draw_stitch(NSPoint c, CGFloat ux, CGFloat uy, int index) {
+  // Deterministic per-stitch variation. Hand stitching is not a ruler, and a
+  // perfectly uniform seam is the thing that reads as printed.
+  unsigned h = static_cast<unsigned>(index) * 2654435761u;
+  h ^= h >> 15;
+  CGFloat jitter = static_cast<CGFloat>(h & 0xFF) / 255.0;        // 0..1
+  CGFloat len = 5.6 + jitter * 0.9;
+  // Consistent lean, not alternating. Seen from one face a hand saddle stitch
+  // slants the same way all along the seam -- it is the *gaps* that slant the
+  // other way. Alternating it produces a zigzag, which is a machine stitch.
+  CGFloat lean = 0.30 + (jitter - 0.5) * 0.09;
+
+  CGFloat ca = cos(lean), sa = sin(lean);
+  CGFloat rx = ux * ca - uy * sa;
+  CGFloat ry = ux * sa + uy * ca;
+
+  CGFloat half = len * 0.5;
+  NSPoint a = NSMakePoint(c.x - rx * half, c.y - ry * half);
+  NSPoint b = NSMakePoint(c.x + rx * half, c.y + ry * half);
+
+  // The perforation: darkest right where the thread enters the hide.
+  [[NSColor colorWithCalibratedWhite:0.0 alpha:0.50] set];
+  for (int k = 0; k < 2; k++) {
+    NSPoint e = k ? b : a;
+    NSRectFillUsingOperation(NSMakeRect(e.x - 1.0, e.y - 1.0, 2.0, 2.0),
+                             NSCompositeSourceOver);
+  }
+
+  NSBezierPath *thread = [NSBezierPath bezierPath];
+  [thread moveToPoint:a];
+  [thread lineToPoint:b];
+  [thread setLineCapStyle:NSRoundLineCapStyle];
+
+  // Shadow, offset down and right away from the light.
+  NSAffineTransform *down = [NSAffineTransform transform];
+  [down translateXBy:0.7 yBy:-0.7];
+  NSBezierPath *shade = [down transformBezierPath:thread];
+  [shade setLineCapStyle:NSRoundLineCapStyle];
+  [shade setLineWidth:2.2];
+  [[NSColor colorWithCalibratedWhite:0.0 alpha:0.34] set];
+  [shade stroke];
+
+  // The thread. Waxed linen against oxblood is a muted tan, not cream -- the
+  // brighter it is the more it reads as a drawn line.
+  [thread setLineWidth:1.9];
+  [[NSColor colorWithCalibratedRed:0.78 green:0.70 blue:0.55
+                             alpha:0.62 + jitter * 0.10] set];
+  [thread stroke];
+
+  // A finer highlight along the top, which is what gives it roundness.
+  NSAffineTransform *up = [NSAffineTransform transform];
+  [up translateXBy:-0.3 yBy:0.4];
+  NSBezierPath *lit = [up transformBezierPath:thread];
+  [lit setLineCapStyle:NSRoundLineCapStyle];
+  [lit setLineWidth:0.8];
+  [[NSColor colorWithCalibratedRed:0.95 green:0.90 blue:0.78 alpha:0.34] set];
+  [lit stroke];
+}
+
 // GCC has no blocks, so the pixel filler is an ordinary function pointer.
 typedef void (*FillFn)(unsigned char *px, int w, int h);
 
@@ -261,24 +327,56 @@ NSColor *rgba(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
 
 + (void)drawStitchingInRect:(NSRect)rect inset:(CGFloat)inset {
   NSRect r = NSInsetRect(rect, inset, inset);
-  NSBezierPath *p = [PPSkin roundedRectPath:r radius:5.0];
+  if (NSWidth(r) < 24.0 || NSHeight(r) < 24.0) return;
 
-  CGFloat pattern[2] = {5.0, 4.0};
-  [p setLineDash:pattern count:2 phase:0.0];
-  [p setLineWidth:2.0];
+  // Walk the path and place each stitch individually, rather than stroking a
+  // dashed line. A dash pattern gives evenly spaced rectangles parallel to the
+  // edge, which is exactly what a dashed border looks like and nothing like
+  // thread. Real saddle stitching leans, and each stitch pulls the leather
+  // slightly where it passes through.
+  NSBezierPath *flat =
+      [[PPSkin roundedRectPath:r radius:6.0] bezierPathByFlatteningPath];
 
-  // The dark trough the thread sits in, then the thread itself one pixel up,
-  // which is what makes it read as stitching rather than a dashed line.
-  [[NSColor colorWithCalibratedWhite:0.0 alpha:0.42] set];
-  [p stroke];
+  const CGFloat period = 8.5;      // centre to centre along the seam
+  CGFloat carry = 0.0;
+  int index = 0;
 
-  NSAffineTransform *up = [NSAffineTransform transform];
-  [up translateXBy:0.0 yBy:-1.0];
-  NSBezierPath *thread = [up transformBezierPath:p];
-  [thread setLineDash:pattern count:2 phase:0.0];
-  [thread setLineWidth:1.5];
-  [[NSColor colorWithCalibratedRed:0.93 green:0.86 blue:0.70 alpha:0.75] set];
-  [thread stroke];
+  NSPoint pts[3];
+  NSPoint cur = NSZeroPoint, first = NSZeroPoint;
+  BOOL started = NO;
+
+  for (NSInteger i = 0; i < [flat elementCount]; i++) {
+    NSBezierPathElement e = [flat elementAtIndex:i associatedPoints:pts];
+    NSPoint next;
+
+    if (e == NSMoveToBezierPathElement) {
+      cur = first = pts[0];
+      started = YES;
+      continue;
+    }
+
+    else if (e == NSLineToBezierPathElement) { next = pts[0]; }
+
+    else if (e == NSClosePathBezierPathElement) { next = first; }
+
+    else { continue; }
+
+    if (!started) { cur = next; started = YES; continue; }
+
+    CGFloat dx = next.x - cur.x, dy = next.y - cur.y;
+    CGFloat seg = sqrt(dx * dx + dy * dy);
+    if (seg > 0.01) {
+      CGFloat ux = dx / seg, uy = dy / seg;
+      for (CGFloat pos = carry; pos < seg; pos += period) {
+        draw_stitch(NSMakePoint(cur.x + ux * pos, cur.y + uy * pos), ux, uy,
+                    index++);
+      }
+      carry = fmod(carry - seg, period);
+      if (carry < 0) carry += period;
+    }
+
+    cur = next;
+  }
 }
 
 + (void)drawRecessedWellInRect:(NSRect)rect radius:(CGFloat)radius {
@@ -414,11 +512,28 @@ NSColor *rgba(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
 @implementation PPPaperView
 
 - (id)initWithFrame:(NSRect)f {
-  if ((self = [super initWithFrame:f])) ruled = YES;
+  if ((self = [super initWithFrame:f])) {
+    ruled = YES;
+    rulePitch = 16.0;
+    rulePhase = 8.0;
+    marginX = 52.0;
+  }
 
   return self;
 }
+
 - (void)setRuled:(BOOL)r { ruled = r; [self setNeedsDisplay:YES]; }
+
+- (void)setRulePitch:(CGFloat)pitch phase:(CGFloat)phase {
+  if (pitch >= 4.0) { rulePitch = pitch; }
+  rulePhase = phase;
+  [self setNeedsDisplay:YES];
+}
+
+- (void)setMarginX:(CGFloat)x {
+  marginX = x;
+  [self setNeedsDisplay:YES];
+}
 
 - (void)drawRect:(NSRect)dirty {
   (void)dirty;
@@ -428,15 +543,26 @@ NSColor *rgba(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
   NSRectFill(b);
 
   if (ruled) {
-    // Faint feint ruling and a red margin, drawn beneath the text.
+    // Ruled downward from the top, because that is where the text starts and
+    // the rules have to agree with it: phase is the drop from the top of the
+    // view to the first line, pitch is one line of body text. Rules on a
+    // half-pixel so they stay hairlines instead of blurring across two rows.
     [[PPSkin ruleColor] set];
-    for (CGFloat y = 24.0; y < NSHeight(b); y += 16.0)
-        NSRectFillUsingOperation(NSMakeRect(0, y, NSWidth(b), 1),
-                                 NSCompositeSourceOver);
-    [[PPSkin marginRuleColor] set];
-    NSRectFillUsingOperation(NSMakeRect(52, 0, 1, NSHeight(b)),
-                             NSCompositeSourceOver);
+    for (CGFloat d = rulePhase; d < NSHeight(b); d += rulePitch) {
+      CGFloat y = floor(NSMaxY(b) - d) + 0.5;
+      if (y < NSMinY(b)) break;
+
+      NSRectFillUsingOperation(NSMakeRect(0, y, NSWidth(b), 1),
+                               NSCompositeSourceOver);
+    }
+
+    if (marginX > 0.0) {
+      [[PPSkin marginRuleColor] set];
+      NSRectFillUsingOperation(NSMakeRect(marginX, 0, 1, NSHeight(b)),
+                               NSCompositeSourceOver);
+    }
   }
+
   [PPSkin drawVignetteInRect:b strength:0.30];
 }
 
