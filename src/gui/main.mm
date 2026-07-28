@@ -14,6 +14,7 @@
 #import "GuiBridge.h"
 #import "Library.h"
 #import "Markdown.h"
+#import "Providers.h"
 #import "Settings.h"
 #import "Skin.h"
 
@@ -570,6 +571,15 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 // Controller
 // ---------------------------------------------------------------------------
 
+// The marker on the one item in the model menu that is not a model. A
+// represented object rather than a title comparison: a provider could one day
+// publish a model called "Change Providers", and a title is not an identity.
+//
+// At file scope rather than inside the @implementation: GCC's Objective-C++
+// front end is unreliable about C declarations between @implementation and
+// @end.
+static NSString * const kProvidersItem = @"ppcode.providers";
+
 // No protocol conformance list: NSTableViewDataSource and NSTableViewDelegate
 // are informal protocols on 10.5 (they were only formalised in 10.6), so
 // declaring conformance does not compile here.
@@ -593,6 +603,7 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   PPBridge *bridge;
   PPSettingsController *settings;
   PPLibraryController *library;
+  PPProvidersController *providers;
   BOOL streaming;
 
   // Streaming markdown. mdBuffer holds the part of the reply whose block has
@@ -613,6 +624,8 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 - (void)indexDroppedFiles:(NSArray *)paths;
 - (void)chooseDocumentsToIndex:(id)sender;
 - (void)showLibrary:(id)sender;
+- (void)showProviders:(id)sender;
+- (void)providersDidChangeProvider;
 - (void)reindexConversations:(id)sender;
 - (void)refreshWorkingDirectory;
 - (void)afterRemovingSessionWasLoaded:(BOOL)wasLoaded message:(NSString *)message;
@@ -1065,6 +1078,20 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 
 - (void)populateModels {
   [modelPopup removeAllItems];
+
+  // The list below is one service's catalogue, so the way to a different one
+  // belongs at the top of it rather than in a settings panel. Everything here
+  // -- which models exist, which are pinned, whether any arrive at all --
+  // follows from the provider, which makes this the honest place to change it.
+  [modelPopup addItemWithTitle:PPUTF8("Change Providers\xE2\x80\xA6")];
+  [[modelPopup lastItem] setRepresentedObject:kProvidersItem];
+  [[modelPopup menu] addItem:[NSMenuItem separatorItem]];
+
+  // Which service those models come from is otherwise invisible: two providers
+  // can serve the same model id at different prices.
+  [modelPopup setToolTip:[NSString stringWithFormat:@"Models from %@",
+                                    [bridge providerName]]];
+
   NSArray *favs = [bridge favouriteModelIds];
   NSEnumerator *fe = [favs objectEnumerator];
   NSString *f;
@@ -1095,7 +1122,15 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
     [modelPopup addItemWithTitle:mid];
     if (++added >= 120) break;
   }
+  // The model in use may not be in the catalogue at all -- an id typed on the
+  // command line, or one the service has since withdrawn. It still has to be
+  // the item showing, or the popup claims the conversation is using something
+  // it is not. Since the first item is now the providers entry, falling back to
+  // index 0 would be a particularly bad lie.
   NSString *cur = [bridge modelId];
+  if (![modelPopup itemWithTitle:cur] && [cur length]) {
+    [modelPopup insertItemWithTitle:cur atIndex:2];
+  }
   if ([modelPopup itemWithTitle:cur]) [modelPopup selectItemWithTitle:cur];
 }
 
@@ -1120,16 +1155,19 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 
   // Without a key nothing works, and an application launched from the Finder
   // does not inherit a key exported in a shell profile. Say so plainly and
-  // open the place where it is set.
+  // open the place where it is set -- which is now the providers window, since
+  // a key belongs to a provider rather than to the application.
   if (![bridge hasApiKey]) {
-    [self append:@"No OpenRouter key is configured.\n"
+    [self append:[NSString stringWithFormat:@"No %@ key is configured.\n",
+                            [bridge providerName]]
            color:[NSColor redColor] bold:YES mono:NO];
     [self appendPlain:
         @"An application launched from the Finder does not inherit your shell "
          "environment, so a key exported in .zshrc is invisible here. Set one "
-         "in Settings (Command-comma); it is stored in your config file with "
-         "owner-only permissions.\n\n"];
-    [self showSettings:nil];
+         "in the window that just opened; it is written to ~/.local/keys, "
+         "readable only by you, and the command line tool reads the same "
+         "file.\n\n"];
+    [self showProviders:nil];
   }
 }
 
@@ -1167,6 +1205,17 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
 - (void)modelChanged:(id)sender {
   NSString *mid = [modelPopup titleOfSelectedItem];
   if (!mid) return;
+
+  // The one item that is not a model. Put the selection back on the model
+  // actually in use before opening the window, or the popup is left showing a
+  // command as though it were the thing answering.
+  if ([[[modelPopup selectedItem] representedObject]
+          isEqual:kProvidersItem]) {
+    [modelPopup selectItemWithTitle:[bridge modelId]];
+    [self showProviders:nil];
+
+    return;
+  }
 
   // Mid-turn the worker thread is reading the config and the system prompt, so
   // the change is refused rather than raced. Put the popup back where it was.
@@ -1229,9 +1278,29 @@ static PPWellView *WrapInPaperWell(NSScrollView *scroll, NSRect frame,
   [library showWindow];
 }
 
+- (void)showProviders:(id)sender {
+  if (!providers) {
+    providers = [[PPProvidersController alloc] initWithBridge:bridge];
+    [providers setDelegate:self];
+  }
+
+  [providers showWindow];
+}
+
+// The provider changed under us: the model list on screen is the old service's
+// catalogue and every id in it is now meaningless.
+- (void)providersDidChangeProvider {
+  [self populateModels];
+  [self appendPlain:[NSString stringWithFormat:@"\n[provider: %@, model: %@]\n\n",
+                        [bridge providerName], [bridge modelId]]];
+  [self setStatus:[NSString stringWithFormat:@"Now using %@",
+                             [bridge providerName]]];
+}
+
 - (void)showSettings:(id)sender {
   if (!settings) {
     settings = [[PPSettingsController alloc] initWithBridge:bridge];
+    [settings setDelegate:self];
   }
 
   [settings showWindow];
@@ -1821,6 +1890,9 @@ static void buildMenuBar(id target) {
                  keyEquivalent:@"m"];
   [windowMenu addItemWithTitle:@"Zoom" action:@selector(performZoom:) keyEquivalent:@""];
   [windowMenu addItem:[NSMenuItem separatorItem]];
+  [[windowMenu addItemWithTitle:@"Providers"
+                         action:@selector(showProviders:)
+                  keyEquivalent:@""] setTarget:target];
   [[windowMenu addItemWithTitle:@"Indexed Content"
                          action:@selector(showLibrary:)
                   keyEquivalent:@"l"] setTarget:target];
@@ -2074,6 +2146,54 @@ static BOOL writeViewPNG(NSView *view, NSString *path) {
     }
   }
 
+  // The providers window and the way in. The entry point is an item in the
+  // model menu that is not a model, so the thing worth asserting is that it is
+  // distinguishable from one: a title match would pass even if the marker that
+  // -modelChanged: actually tests were missing, and the failure that produces
+  // is silent -- picking it would set the model to "Change Providers...".
+  {
+    NSMenuItem *first =
+        [modelPopup numberOfItems] > 0 ? [modelPopup itemAtIndex:0] : nil;
+    BOOL marked = [[first representedObject] isEqual:kProvidersItem];
+    printf("  %-4s model menu opens with the providers item\n",
+           marked ? "ok" : "FAIL");
+    if (!marked) failures++;
+
+    NSArray *known = [bridge availableProviders];
+    int inUse = 0;
+    NSEnumerator *pe = [known objectEnumerator];
+    NSDictionary *p;
+    while ((p = [pe nextObject]) != nil)
+      if ([[p objectForKey:@"id"] isEqualToString:[bridge providerId]]) inUse++;
+
+    printf("  %-4s %d providers, exactly one in use\n",
+           (([known count] > 1) && inUse == 1) ? "ok" : "FAIL",
+           (int)[known count]);
+    if (!(([known count] > 1) && inUse == 1)) failures++;
+
+    if (!providers) {
+      providers = [[PPProvidersController alloc] initWithBridge:bridge];
+      [providers setDelegate:self];
+    }
+
+    NSMutableDictionary *ptally = [NSMutableDictionary dictionary];
+    countViews([[providers panelWindow] contentView], ptally);
+
+    struct { const char *cls; const char *what; } wanted[] = {
+      {"NSTableView",       "provider list"},
+      {"NSSecureTextField", "key field"},
+      {"NSButton",          "switch button"},
+    };
+    for (unsigned i = 0; i < sizeof(wanted) / sizeof(wanted[0]); i++) {
+      NSNumber *have = [ptally objectForKey:
+          [NSString stringWithUTF8String:wanted[i].cls]];
+      BOOL ok = (have && [have intValue] > 0);
+      printf("  %-4s providers window has a %s\n", ok ? "ok" : "FAIL",
+             wanted[i].what);
+      if (!ok) failures++;
+    }
+  }
+
   printf("\n%s\n", failures == 0 ? "all checks passed" : "CHECKS FAILED");
 
   return failures == 0 ? 0 : 1;
@@ -2209,6 +2329,26 @@ static BOOL writeViewPNG(NSView *view, NSString *path) {
 
     else {
       printf("  FAIL library.png\n");
+      failures++;
+    }
+  }
+
+  // The providers window, for the same reason: it is only ever on screen
+  // because someone opened it.
+  {
+    if (!providers) {
+      providers = [[PPProvidersController alloc] initWithBridge:bridge];
+      [providers setDelegate:self];
+    }
+
+    NSWindow *pw = [providers panelWindow];
+    NSString *path = [dir stringByAppendingPathComponent:@"providers.png"];
+    if (writeViewPNG([pw contentView], path)) {
+      printf("  ok   providers.png\n");
+    }
+
+    else {
+      printf("  FAIL providers.png\n");
       failures++;
     }
   }

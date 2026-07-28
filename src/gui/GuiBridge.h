@@ -54,12 +54,12 @@ struct BridgeState;
 - (BOOL)isBusy;
 - (void)cancel;
 
-// API key. A GUI application launched from the Finder does not inherit the
-// shell environment, so the key usually has to come from the config file or be
-// entered in the interface.
+// Is there a key for the provider in use? A GUI application launched from the
+// Finder does not inherit the shell environment, so a key exported in a profile
+// is invisible here and one usually has to be entered in the interface --
+// see -saveKey:forProvider:error: below.
 - (BOOL)hasApiKey;
 - (NSString *)configPath;
-- (BOOL)saveApiKey:(NSString *)key error:(NSString **)err;
 
 // Whole-config access, so the settings window does not need an accessor per
 // field. Values map JSON <-> Foundation objects.
@@ -83,9 +83,10 @@ struct BridgeState;
 // Which service to talk to. The command line has --provider; without this the
 // application could only ever use whatever the config file said.
 
-// Dictionaries with: id, name, baseURL, hasKey, needsKey.
+// Dictionaries with: id, name, baseURL, hasKey, needsKey, keySource.
 - (NSArray *)availableProviders;
 - (NSString *)providerId;
+- (NSString *)providerName;
 
 // Switching reloads the model catalogue, since the previous provider's ids
 // mean nothing to the new one. Returns NO while a turn is running.
@@ -95,6 +96,15 @@ struct BridgeState;
 // cannot run on a PowerPC G5, so it is always on another machine.
 - (NSString *)baseURLForProvider:(NSString *)pid;
 - (BOOL)setBaseURL:(NSString *)url forProvider:(NSString *)pid;
+
+// A provider's key, written to the key file the command line already reads, so
+// one entered here is the same key ppcode finds in a terminal.
+- (BOOL)saveKey:(NSString *)key forProvider:(NSString *)pid error:(NSString **)err;
+
+// Where the key in force came from: "environment (DEEPSEEK_API_KEY)", a path,
+// or empty for none. An exported variable beats the file, so a key that was
+// just typed and appears to do nothing has a visible explanation.
+- (NSString *)keySourceForProvider:(NSString *)pid;
 
 - (NSString *)modelId;
 - (void)setModelId:(NSString *)mid;

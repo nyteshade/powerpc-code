@@ -129,11 +129,9 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 
 - (void)refreshProviderUI;
 
-- (void)providerChanged:(id)sender;
+- (void)showProviders:(id)sender;
 
-- (void)providerURLChanged:(id)sender;
-
-- (NSView *)buildKeysTab;
+- (NSView *)buildSearchTab;
 
 - (NSView *)buildModelTab;
 
@@ -162,44 +160,27 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
   [super dealloc];
 }
 
+- (id)delegate { return delegate; }
+
+// Not retained: the delegate is the application controller, which owns this.
+- (void)setDelegate:(id)d { delegate = d; }
+
 // ---------------------------------------------------------------------------
 
-- (NSView *)buildKeysTab {
+- (NSView *)buildSearchTab {
   NSView *v = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 300)] autorelease];
   CGFloat y = kPaneTop;
   CGFloat r;
 
-  r = NextRow(&y, kFieldH, 0);
-  [v addSubview:MakeLabel(@"OpenRouter key:",
-                          NSMakeRect(20, Centred(r, kFieldH, kLabelH), 120, kLabelH),
-                          YES)];
-  openrouterKey = [[[NSSecureTextField alloc]
-      initWithFrame:NSMakeRect(148, r, 340, kFieldH)] autorelease];
-  [v addSubview:openrouterKey];
-
-  r = NextRow(&y, 2 * kLineH, 4);
-  [v addSubview:MakeNote(@"Required. Get one at openrouter.ai/keys. Stored in "
-                          "your config file with owner-only permissions.",
-                         NSMakeRect(148, r, 350, 2 * kLineH))];
-
-  r = NextRow(&y, kLineH, 6);
-  keyStatus = MakeNote(@"", NSMakeRect(148, r, 350, kLineH));
-  [v addSubview:keyStatus];
-
-  r = NextRow(&y, 3 * kLineH, 14);
-  [v addSubview:MakeNote(@"An application launched from the Finder does not "
-                          "inherit your shell environment, so a key exported in "
-                          ".zshrc is not visible here. That is why it is set in "
-                          "this window instead.",
-                         NSMakeRect(20, r, 470, 3 * kLineH))];
-
-  r = NextRow(&y, kLabelH, 16);
+  r = NextRow(&y, kLabelH, 0);
   [v addSubview:MakeSection(@"Web search keys", NSMakeRect(20, r, 200, kLabelH))];
 
-  r = NextRow(&y, kLineH, 2);
+  r = NextRow(&y, 2 * kLineH, 2);
   [v addSubview:MakeNote(@"Optional. Without one, web_search falls back to "
-                          "Wikipedia and instant answers.",
-                         NSMakeRect(20, r, 470, kLineH))];
+                          "Wikipedia and instant answers. The key for the model "
+                          "provider is not here: it is part of configuring the "
+                          "provider, in Window > Providers.",
+                         NSMakeRect(20, r, 470, 2 * kLineH))];
 
   r = NextRow(&y, kFieldH, 8);
   [v addSubview:MakeLabel(@"Tavily:",
@@ -217,6 +198,17 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
       initWithFrame:NSMakeRect(148, r, 340, kFieldH)] autorelease];
   [v addSubview:braveKey];
 
+  r = NextRow(&y, 3 * kLineH, 14);
+  [v addSubview:MakeNote(@"An application launched from the Finder does not "
+                          "inherit your shell environment, so a key exported in "
+                          ".zshrc is not visible here. That is why keys are set "
+                          "in the interface at all.",
+                         NSMakeRect(20, r, 470, 3 * kLineH))];
+
+  r = NextRow(&y, kLineH, 10);
+  saveStatus = MakeNote(@"", NSMakeRect(20, r, 470, kLineH));
+  [v addSubview:saveStatus];
+
   return v;
 }
 
@@ -225,38 +217,29 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
   CGFloat y = kPaneTop;
   CGFloat r;
 
-  // Which service, first: it decides what the model list below can contain.
+  // Named but not chosen here. Switching provider replaces the whole model
+  // list, which is too large a consequence for a row in a preferences pane, and
+  // an address and a key have to be configurable alongside it -- so it has a
+  // window, and this is a signpost to it.
   r = NextRow(&y, kPopupH, 0);
   [v addSubview:MakeLabel(@"Provider:",
                           NSMakeRect(20, Centred(r, kPopupH, kLabelH), 120, kLabelH),
                           YES)];
-  providerPopup = [[[NSPopUpButton alloc]
-      initWithFrame:NSMakeRect(146, r, 200, kPopupH)] autorelease];
-  [providerPopup setTarget:self];
-  [providerPopup setAction:@selector(providerChanged:)];
-  [v addSubview:providerPopup];
+  providerLabel = MakeNote(@"", NSMakeRect(148, Centred(r, kPopupH, kLineH),
+                                           190, kLineH));
+  [[providerLabel cell] setFont:[NSFont systemFontOfSize:11.0]];
+  [[providerLabel cell] setTextColor:[NSColor blackColor]];
+  [v addSubview:providerLabel];
 
-  providerStatus = MakeNote(@"", NSMakeRect(354, Centred(r, kPopupH, kLineH),
-                                            140, kLineH));
-  [v addSubview:providerStatus];
+  [v addSubview:MakePush(PPUTF8("Change Providers\xE2\x80\xA6"),
+                         NSMakeRect(340, r - 2, 150, 26), self,
+                         @selector(showProviders:))];
 
-  // The address is editable because LM Studio cannot run on this machine --
-  // it is always on another one, and which one is a property of the network,
-  // not of the provider.
-  r = NextRow(&y, kFieldH, 6);
-  [v addSubview:MakeLabel(@"Address:",
-                          NSMakeRect(20, Centred(r, kFieldH, kLabelH), 120, kLabelH),
-                          NO)];
-  providerURL = [[[NSTextField alloc]
-      initWithFrame:NSMakeRect(146, r, 344, kFieldH)] autorelease];
-  [providerURL setTarget:self];
-  [providerURL setAction:@selector(providerURLChanged:)];
-  [v addSubview:providerURL];
-
-  r = NextRow(&y, 2 * kLineH, 2);
-  [v addSubview:MakeNote(@"Blank restores the default. A key comes from the "
-                          "provider's environment variable or ~/.local/keys.",
-                         NSMakeRect(146, r, 350, 2 * kLineH))];
+  r = NextRow(&y, 2 * kLineH, 6);
+  [v addSubview:MakeNote(@"The address and the key belong to the provider and "
+                          "are set there. The models below are the ones it "
+                          "offers.",
+                         NSMakeRect(148, r, 342, 2 * kLineH))];
 
   r = NextRow(&y, kPopupH, 10);
   [v addSubview:MakeLabel(@"Default model:",
@@ -559,7 +542,7 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
         initWithFrame:NSMakeRect(12, 46, 536, 342)] autorelease];
 
     struct { NSString *label; SEL builder; } pages[] = {
-      {@"Keys",       @selector(buildKeysTab)},
+      {@"Search",     @selector(buildSearchTab)},
       {@"Model",      @selector(buildModelTab)},
       {@"Routing",    @selector(buildRoutingTab)},
       {@"MCP",        @selector(buildMcpTab)},
@@ -628,59 +611,34 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
       [defaultModel selectItemWithTitle:cur];
 }
 
+// Reads the provider rather than choosing it. What it says is the whole reason
+// the model list looks the way it does, so it names the key situation too: a
+// list that comes back empty for want of a key is otherwise indistinguishable
+// from a service with nothing to offer.
 - (void)refreshProviderUI {
   NSString *current = [bridge providerId];
-  [providerPopup removeAllItems];
+  NSString *note = @"";
 
   NSEnumerator *e = [[bridge availableProviders] objectEnumerator];
   NSDictionary *p;
   while ((p = [e nextObject]) != nil) {
-    [providerPopup addItemWithTitle:[p objectForKey:@"name"]];
-    // The id travels with the item, so the menu can show a human name without
-    // the action having to map back from it.
-    [[providerPopup lastItem] setRepresentedObject:[p objectForKey:@"id"]];
+    if (![[p objectForKey:@"id"] isEqualToString:current]) { continue; }
 
-    if ([[p objectForKey:@"id"] isEqualToString:current]) {
-      [providerPopup selectItem:[providerPopup lastItem]];
-
-      BOOL needs = [[p objectForKey:@"needsKey"] boolValue];
-      BOOL has = [[p objectForKey:@"hasKey"] boolValue];
-      [providerStatus setStringValue:!needs ? @"no key needed"
-                                            : (has ? @"key found" : @"NO KEY")];
-    }
+    BOOL needs = [[p objectForKey:@"needsKey"] boolValue];
+    BOOL has = [[p objectForKey:@"hasKey"] boolValue];
+    note = !needs ? @"no key needed" : (has ? @"key found" : @"NO KEY");
   }
 
-  [providerURL setStringValue:[bridge baseURLForProvider:current]];
+  [providerLabel setStringValue:
+      [NSString stringWithFormat:PPUTF8("%@ \xE2\x80\x94 %@"),
+                [bridge providerName], note]];
 }
 
-- (void)providerChanged:(id)sender {
-  NSString *pid = [[providerPopup selectedItem] representedObject];
-  if (![pid length]) { return; }
-
-  if (![bridge setProviderId:pid]) {
-    [self refreshProviderUI];   // put the menu back
-    NSAlert *a = [[[NSAlert alloc] init] autorelease];
-    [a setMessageText:@"Could not switch provider."];
-    [a setInformativeText:@"A turn may still be running."];
-    [a addButtonWithTitle:@"OK"];
-    [a runModal];
-
-    return;
-  }
-
-  // The model list belongs to the provider, so it is rebuilt rather than left
-  // showing ids the new service would reject.
-  [self refreshProviderUI];
-  [self loadModelList];
-}
-
-- (void)providerURLChanged:(id)sender {
-  NSString *pid = [[providerPopup selectedItem] representedObject];
-  if (![pid length]) { return; }
-
-  [bridge setBaseURL:[providerURL stringValue] forProvider:pid];
-  [self refreshProviderUI];
-  [self loadModelList];
+// The panel does not own the providers window; the application controller does,
+// so that the same window answers to the menu, the model popup and this button.
+- (void)showProviders:(id)sender {
+  if ([delegate respondsToSelector:@selector(showProviders:)])
+      [delegate showProviders:self];
 }
 
 - (void)temperatureChanged:(id)sender {
@@ -700,13 +658,7 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 - (void)load:(id)sender {
   NSDictionary *cfg = [bridge configDictionary];
 
-  [openrouterKey setStringValue:Or([cfg objectForKey:@"api_key"], @"")];
-  [keyStatus setStringValue:[bridge hasApiKey]
-      ? @"A key is configured."
-      : PPUTF8("No key yet \xE2\x80\x94 ppcode cannot talk to any model "
-               "until one is set.")];
-  [[keyStatus cell] setTextColor:[bridge hasApiKey] ? [NSColor darkGrayColor]
-                                                    : [NSColor redColor]];
+  [saveStatus setStringValue:@""];
 
   NSDictionary *search = [cfg objectForKey:@"search_keys"];
   [tavilyKey setStringValue:Or([search objectForKey:@"tavily"], @"")];
@@ -794,11 +746,6 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
   NSMutableDictionary *cfg =
       [[[bridge configDictionary] mutableCopy] autorelease];
 
-  NSString *key = [[openrouterKey stringValue]
-      stringByTrimmingCharactersInSet:
-          [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-  if ([key length] > 0) [cfg setObject:key forKey:@"api_key"];
-
   NSMutableDictionary *search = [NSMutableDictionary dictionary];
   NSString *tavily = [tavilyKey stringValue];
   NSString *brave = [braveKey stringValue];
@@ -848,7 +795,7 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
     return;
   }
   [self load:nil];
-  [keyStatus setStringValue:@"Saved."];
+  [saveStatus setStringValue:@"Saved."];
 }
 
 // ---- MCP table -------------------------------------------------------------

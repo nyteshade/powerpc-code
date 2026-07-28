@@ -665,53 +665,12 @@ static ppcode::json ObjCToJson(id o) {
 - (BOOL)hasApiKey { return st->cfg.api_key.empty() ? NO : YES; }
 - (NSString *)configPath { return Str(st->cfg.config_path); }
 
-- (BOOL)saveApiKey:(NSString *)key error:(NSString **)err {
-  std::string k = trim(Cpp(key));
-  if (k.empty()) {
-    if (err) *err = @"The key is empty.";
-
-    return NO;
-  }
-  // A weak sanity check, so a pasted URL or a stray word is caught here
-  // rather than as an opaque 401 later.
-  if (k.size() < 20 || k.find(' ') != std::string::npos) {
-    if (err) *err = @"That does not look like an OpenRouter key. They start "
-                     "with sk-or- and contain no spaces.";
-
-    return NO;
-  }
-
-  st->cfg.api_key = k;
-  st->client->set_api_key(k);
-
-  // Persist it. Config::save deliberately omits the key, so write it here and
-  // tighten the permissions -- this is a credential.
-  std::string path = st->cfg.config_path;
-  json j = json::object();
-  std::string existing;
-  if (read_file_text(path, &existing, nullptr)) {
-    json parsed = json::parse(existing, nullptr, false, true);
-    if (!parsed.is_discarded() && parsed.is_object()) j = parsed;
-  }
-  j["api_key"] = k;
-  j["model"] = st->cfg.model;
-
-  std::error_code ec;
-  std::filesystem::path p(path);
-  if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
-
-  std::string werr;
-  if (!write_file_text(path, j.dump(2) + "\n", &werr)) {
-    if (err) *err = Str(werr);
-
-    return NO;
-  }
-  std::filesystem::permissions(
-      path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-      std::filesystem::perm_options::replace, ec);
-
-  return YES;
-}
+// A key used to be written into config.json here, which put it in a second
+// place ppcode also looks -- and the two disagreed: Config::load adopts the
+// per-provider map built from the environment and the key files, so the config
+// file's copy was read and then dropped, and a key entered in Settings worked
+// until the next launch. -saveKey:forProvider:error: writes the key file that
+// was always the real store.
 
 - (NSArray *)availableProviders {
   NSMutableArray *out = [NSMutableArray array];
@@ -722,8 +681,18 @@ static ppcode::json ObjCToJson(id o) {
     [d setObject:[self baseURLForProvider:Str(p->id)] forKey:@"baseURL"];
     [d setObject:[NSNumber numberWithBool:p->needs_key ? YES : NO]
           forKey:@"needsKey"];
-    [d setObject:[NSNumber numberWithBool:!resolve_api_key(*p).empty()]
-          forKey:@"hasKey"];
+    // A key can also have arrived from the config file, which resolve_api_key
+    // knows nothing about -- it reads the environment and the key files. Ask
+    // the loaded config too, or a working key reads as missing.
+    std::string source = api_key_source(*p);
+    bool have = !source.empty();
+    if (!have && st->cfg.api_keys.count(p->id)) {
+      have = true;
+      source = st->cfg.config_path;
+    }
+
+    [d setObject:[NSNumber numberWithBool:have ? YES : NO] forKey:@"hasKey"];
+    [d setObject:Str(source) forKey:@"keySource"];
     [out addObject:d];
   }
 
@@ -731,6 +700,12 @@ static ppcode::json ObjCToJson(id o) {
 }
 
 - (NSString *)providerId { return Str(st->cfg.provider_id); }
+
+- (NSString *)providerName {
+  const Provider *p = find_provider(st->cfg.provider_id);
+
+  return p ? Str(p->name) : Str(st->cfg.provider_id);
+}
 
 - (BOOL)setProviderId:(NSString *)pid {
   // Same reasoning as the model and the working directory: the worker thread
@@ -791,6 +766,57 @@ static ppcode::json ObjCToJson(id o) {
 
   std::string err;
   return st->cfg.save(&err) ? YES : NO;
+}
+
+- (BOOL)saveKey:(NSString *)key forProvider:(NSString *)pid error:(NSString **)err {
+  const Provider *p = find_provider(Cpp(pid));
+  if (!p) {
+    if (err) *err = @"No such provider.";
+
+    return NO;
+  }
+
+  std::string k = trim(Cpp(key));
+
+  // Deliberately weak: every service has its own prefix and length, and a
+  // check that knows them all is a check that rejects the next one. A space is
+  // the only thing that is always wrong -- it means something else was pasted.
+  if (k.empty() || k.find(' ') != std::string::npos) {
+    if (err) *err = k.empty() ? @"The key is empty."
+                              : @"A key contains no spaces -- check what was pasted.";
+
+    return NO;
+  }
+
+  std::string werr;
+  if (!save_api_key(*p, k, &werr)) {
+    if (err) *err = Str(werr);
+
+    return NO;
+  }
+
+  st->cfg.api_keys[p->id] = k;
+
+  // In force immediately when it belongs to the provider in use. The catalogue
+  // goes with it: without a key the model list came back empty, and it would
+  // otherwise stay empty until something else happened to clear it.
+  if (p->id == st->cfg.provider_id) {
+    st->cfg.api_key = k;
+    st->client->set_api_key(k);
+    st->catalog = ModelCatalog();
+  }
+
+  return YES;
+}
+
+- (NSString *)keySourceForProvider:(NSString *)pid {
+  const Provider *p = find_provider(Cpp(pid));
+  if (!p) return @"";
+
+  std::string source = api_key_source(*p);
+  if (source.empty() && st->cfg.api_keys.count(p->id)) source = st->cfg.config_path;
+
+  return Str(source);
 }
 
 - (NSString *)modelId { return Str(st->cfg.model); }

@@ -1345,6 +1345,83 @@ void test_providers() {
 
     check(provider_id_list().find("deepseek") != std::string::npos,
           "the id list names deepseek");
+
+    // Saving a key, and reading it back the way the CLI would. HOME is moved to
+    // a temporary directory for the duration so this never touches the real
+    // ~/.local/keys, and the environment variables are cleared and restored,
+    // because an exported key would otherwise satisfy the read and the file
+    // would go untested. Everything is put back: later tests, and --net, need
+    // the real environment.
+    {
+        const char* home_before = std::getenv("HOME");
+        std::string saved_home = home_before ? home_before : "";
+
+        const char* ds_before = std::getenv("DEEPSEEK_API_KEY");
+        std::string saved_ds = ds_before ? ds_before : "";
+        bool had_ds = ds_before != nullptr;
+
+        std::string dir = "/tmp/ppcode-keyfile-test";
+        fs::remove_all(dir);
+        fs::create_directories(dir);
+        setenv("HOME", dir.c_str(), 1);
+        unsetenv("DEEPSEEK_API_KEY");
+
+        const Provider* p = find_provider("deepseek");
+        check(resolve_api_key(*p).empty(), "no key before one is saved");
+        check(api_key_source(*p).empty(), "and no source to report");
+
+        // A key written into config.json used to be parsed and then dropped:
+        // use_provider() adopts the per-provider map, which is built from the
+        // environment and the key files, and the file's key was in neither. So
+        // a key set in the interface worked until the next launch. Checked here
+        // because it only shows with nothing in the environment.
+        {
+            Config c;
+            c.api_key = "sk-from-the-config-file";
+            c.api_keys["deepseek"] = c.api_key;
+            check(c.use_provider("deepseek", false, false), "provider selected");
+            check(c.api_key == "sk-from-the-config-file",
+                  "a config-file key survives selecting its provider");
+        }
+
+        std::string err;
+        check(save_api_key(*p, "sk-test-1234567890", &err), "a key is saved");
+        check(resolve_api_key(*p) == "sk-test-1234567890",
+              "and reads back through the key file");
+        check(api_key_source(*p) == dir + "/.local/keys/deepseek",
+              "the source names the file it came from");
+
+        // Owner-only. A credential written world-readable is the kind of thing
+        // nobody notices until it matters.
+        fs::perms mode = fs::status(dir + "/.local/keys/deepseek").permissions();
+        check((mode & (fs::perms::group_all | fs::perms::others_all)) ==
+                  fs::perms::none,
+              "the key file is readable only by its owner");
+
+        // Overwriting rather than appending: a second save must not leave the
+        // first key in the file for the parser to find.
+        check(save_api_key(*p, "sk-test-second-key-99", &err), "a key is replaced");
+        check(resolve_api_key(*p) == "sk-test-second-key-99",
+              "the newer key is the one that answers");
+
+        check(!save_api_key(*p, "   ", &err), "an empty key is refused");
+
+        // The environment still wins, which is the surprise the interface has
+        // to explain to anyone whose typed key appears to do nothing.
+        setenv("DEEPSEEK_API_KEY", "sk-from-the-environment", 1);
+        check(resolve_api_key(*p) == "sk-from-the-environment",
+              "an exported key beats the saved one");
+        check(api_key_source(*p).find("environment") != std::string::npos,
+              "and the source says so");
+
+        // Restored on every path out of here.
+        unsetenv("DEEPSEEK_API_KEY");
+        if (had_ds) setenv("DEEPSEEK_API_KEY", saved_ds.c_str(), 1);
+        if (!saved_home.empty()) setenv("HOME", saved_home.c_str(), 1);
+
+        else unsetenv("HOME");
+        fs::remove_all(dir);
+    }
 }
 
 void test_web() {

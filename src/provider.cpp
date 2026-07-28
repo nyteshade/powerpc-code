@@ -1,6 +1,8 @@
 #include "provider.hpp"
 
+#include <cctype>
 #include <cstdlib>
+#include <filesystem>
 
 namespace ppcode {
 
@@ -97,6 +99,10 @@ std::vector<Provider> build_registry() {
         p.name = "LM Studio";
         p.base_url = "http://localhost:1234/v1";
         p.key_env = {"LMSTUDIO_API_KEY"};   // honoured if set; not required
+        // A key file even though no key is needed: an LM Studio reached across
+        // the network may well sit behind a proxy that wants one, and there has
+        // to be somewhere to put it.
+        p.key_file = ".local/keys/lmstudio";
         p.needs_key = false;
         p.has_models_endpoint = true;
         p.models_have_metadata = false;
@@ -197,6 +203,79 @@ std::string resolve_api_key(const Provider& p) {
     }
 
     return key_from_file(p.key_file, p.key_env);
+}
+
+std::string api_key_path(const Provider& p) {
+    const char* home = std::getenv("HOME");
+    if (!home || !*home || p.key_file.empty()) return "";
+
+    return std::string(home) + "/" + p.key_file;
+}
+
+std::string api_key_source(const Provider& p) {
+    for (const std::string& name : p.key_env) {
+        if (const char* v = std::getenv(name.c_str()); v && *v)
+            return "environment (" + name + ")";
+    }
+    if (!key_from_file(p.key_file, p.key_env).empty()) return api_key_path(p);
+
+    return "";
+}
+
+bool save_api_key(const Provider& p, const std::string& key, std::string* error) {
+    std::string k = trim(key);
+    if (k.empty()) {
+        if (error) *error = "the key is empty";
+
+        return false;
+    }
+
+    std::string path = api_key_path(p);
+    if (path.empty()) {
+        if (error) *error = "no key file is defined for " + p.name;
+
+        return false;
+    }
+
+    // The name the file is read back under. resolve_api_key() looks for any of
+    // key_env, so writing the first one is enough; a provider with none at all
+    // would be unreadable, hence the derived fallback.
+    std::string name;
+    if (!p.key_env.empty()) name = p.key_env.front();
+
+    else {
+        for (size_t i = 0; i < p.id.size(); i++)
+            name += static_cast<char>(std::toupper(
+                static_cast<unsigned char>(p.id[i])));
+        name += "_API_KEY";
+    }
+
+    std::error_code ec;
+    std::filesystem::path fp(path);
+    if (fp.has_parent_path()) {
+        std::filesystem::create_directories(fp.parent_path(), ec);
+        if (ec) {
+            if (error) *error = "could not create " +
+                                fp.parent_path().string() + ": " + ec.message();
+
+            return false;
+        }
+    }
+
+    // Written as a shell fragment because that is what these files have always
+    // been: the same file can be sourced from a profile, which is how the key
+    // reaches a terminal as well as the application.
+    if (!write_file_text(path, "export " + name + "=" + k + "\n", error))
+        return false;
+
+    // A credential. Doing this after the write leaves no window in which the
+    // file exists with the default mask.
+    std::filesystem::permissions(
+        path,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace, ec);
+
+    return true;
 }
 
 double estimate_cost(const Provider& p, const std::string& model,

@@ -16,18 +16,18 @@
   NSWindow *panel;
   PPBridge *bridge;
 
-  // Keys
-  NSSecureTextField *openrouterKey;
-  NSTextField *keyStatus;
+  // Whoever opens the providers window on this panel's behalf -- the
+  // application controller. Not retained; it owns this object.
+  id delegate;
+
+  // Search keys. The provider keys are deliberately not here: a key is part of
+  // configuring a provider, and that lives in the Providers window.
+  NSTextField *saveStatus;
   NSSecureTextField *tavilyKey;
   NSSecureTextField *braveKey;
 
-  // Provider
-  NSPopUpButton *providerPopup;
-  NSTextField *providerURL;
-  NSTextField *providerStatus;
-
   // Model
+  NSTextField *providerLabel;   // which service the model list below comes from
   NSPopUpButton *defaultModel;
   NSTextField *maxTokensField;
   NSTextField *maxTurnsField;
@@ -63,6 +63,11 @@
 
 - (id)initWithBridge:(PPBridge *)b;
 - (void)showWindow;
+
+// Sent -showProviders: when the Model tab's button is pressed. Informal, like
+// PPBridge's own delegate.
+- (id)delegate;
+- (void)setDelegate:(id)d;
 
 // The panel itself, so --shot can render each tab offscreen. Building it is a
 // side effect of asking, which is what makes a headless screenshot possible.

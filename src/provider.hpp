@@ -81,6 +81,22 @@ std::string provider_id_list();
 // there is none, which is not an error for a provider that needs no key.
 std::string resolve_api_key(const Provider& p);
 
+// The absolute path of a provider's key file, or empty when it has none.
+std::string api_key_path(const Provider& p);
+
+// Where the key actually came from, for an interface that has to explain why
+// typing one changed nothing: "environment (DEEPSEEK_API_KEY)", the path of the
+// key file, or empty when there is no key at all. The environment wins over the
+// file, so a stale exported variable is worth naming rather than hiding.
+std::string api_key_source(const Provider& p);
+
+// Write a key to the provider's key file, owner-readable only. This is the one
+// per-provider store the command line already reads, so a key set in the
+// application is the same key the CLI will find -- the alternative, a second
+// copy in config.json, is how a key comes to be configured in one place and
+// missing in the other.
+bool save_api_key(const Provider& p, const std::string& key, std::string* error);
+
 // Cost of an exchange in USD for providers that do not report one. Returns 0
 // when the model's prices are unknown, which the caller must treat as "not
 // known" rather than "free".

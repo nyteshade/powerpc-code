@@ -163,6 +163,15 @@ Config Config::load(const std::string& explicit_path, std::vector<std::string>* 
         }
     }
 
+    // A key from the config file belongs to the provider the file selects, and
+    // has to be put in the map before use_provider() adopts it. Without this
+    // line the key was parsed and then dropped on the next statement -- the map
+    // is filled from the environment and the key files, and the file's key was
+    // in neither, so a key set in the Settings window worked until the next
+    // launch and then vanished. The environment and key files still win: they
+    // are filled in after this and only overwrite when they have something.
+    if (!cfg.api_key.empty()) cfg.api_keys[cfg.provider_id] = cfg.api_key;
+
     // The provider decides the base URL, the default model and where the key
     // comes from, so it is resolved before either is finalised. Whether the
     // file named them explicitly decides what may be overwritten.

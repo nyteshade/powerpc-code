@@ -49,8 +49,9 @@ front end.
 - **CLI/TUI** — ncurses, UTF-8, markdown + syntax highlighting, mouse scrolling,
   searchable model picker, mid-turn steering, sessions, compaction.
 - **Headless** — `-p`, `--output json|stream-json`, job files (`-j`), `--continue`.
-- **Cocoa app** — `ppcode gui`. Settings window, drag-and-drop attachments,
-  session list, CLI installer.
+- **Cocoa app** — `ppcode gui`. Settings window, providers window (opened from
+  the top of the model menu — pick the service, set its address and key),
+  drag-and-drop attachments, session list, CLI installer.
 
 **~30 tools**: files (incl. `multi_edit`, `read_many_files`), `bash`, `build`
 (structured diagnostics), background jobs, web fetch/search, Apple docs search,
@@ -154,7 +155,9 @@ All documented in `knowledge/`, but the ones that cost the most time:
 3. **`size_t` underflow in padding maths** produces a multi-gigabyte string.
    Guard every `field - width`.
 4. **A GUI app launched from the Finder inherits no shell environment**, which is
-   why the API key must come from the config file or the Settings window.
+   why the API key must be enterable in the interface. It is written to
+   `~/.local/keys/<provider>` — the same file the CLI reads — not to the config
+   file, which was a second store that quietly disagreed with the first.
 5. **`plutil` cannot lint a `.xib`** — it fails on pristine files too. Verify with
    `ibtool --compile` instead.
 6. **`port install` compiles from source** — hours to days here. Never suggest it

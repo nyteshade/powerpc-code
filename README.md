@@ -65,7 +65,8 @@ own copy the same way, from Settings.
 ## Requirements
 
 - A PowerPC Mac running Mac OS X 10.5 Leopard
-- An [OpenRouter](https://openrouter.ai) API key
+- An [OpenRouter](https://openrouter.ai) or [DeepSeek](https://deepseek.com) API
+  key, or an LM Studio server on another machine on the network
 
 To *build* from source you additionally need MacPorts `gcc15`, `curl`, `ncurses`
 and `gmake` — see [`scripts/macports_prereqs.sh`](scripts/macports_prereqs.sh).
@@ -141,7 +142,17 @@ export OPENROUTER_AI_API_KEY=sk-or-...   # OPENROUTER_API_KEY also accepted
 ppcode --write-config                    # ~/.config/ppcode/config.json
 ```
 
-The key is read from the environment and is never written to disk or logged.
+The key is read from the environment first, then from
+`~/.local/keys/<provider>` — a shell fragment holding `export NAME=value`,
+readable only by you. The file exists because an application launched from the
+Finder inherits no shell environment, so a key exported in `.zshrc` is invisible
+to it; the application writes that same file, which is why a key set in the
+window is one the command line then finds. It is never written to the config
+file or logged.
+
+Other services are selected with `--provider` (`openrouter`, `deepseek`,
+`lmstudio`), or in the application from **Change Providers…** at the top of the
+model menu, which is also where each one's address and key are set.
 
 ## Usage
 
