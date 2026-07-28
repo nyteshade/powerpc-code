@@ -119,6 +119,21 @@ build/%.o: src/%.cpp | dirs
 build/gui/%.o: src/gui/%.mm | dirs
 	$(CXX) $(CXXFLAGS) -x objective-c++ -MMD -MP -c $< -o $@
 
+# The version and the revision arrive as -D flags, and make cannot see a flag
+# change: after a commit, the sources are untouched, so nothing rebuilds and the
+# binary keeps reporting the revision it was first compiled with. A delivery
+# then ships a bundle stamped with a stale, often -dirty, revision -- which was
+# exactly the thing an installed build was supposed to stop doing.
+#
+# The one object that embeds version.hpp therefore depends on the two files the
+# stamp is read from, so changing either forces the recompile.
+build/main.o: VERSION .build-rev
+
+# Order-only would not do: .build-rev genuinely changes, and it may not exist at
+# all on a machine with no git checkout.
+.build-rev:
+	@touch $@
+
 $(GUI_BIN): $(CORE_OBJS) $(GUI_OBJS) $(SQLITE_OBJS)
 	$(CXX) $(LDFLAGS) $(CORE_OBJS) $(GUI_OBJS) $(SQLITE_OBJS) $(LIBS) \
 	    -framework Cocoa -o $@.tmp
