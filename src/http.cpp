@@ -155,6 +155,19 @@ const char* ca_bundle_path() {
     return cached.empty() ? nullptr : cached.c_str();
 }
 
+// Collects response headers. curl calls this once per line, including the
+// status line and the blank line that ends the block; both are dropped.
+size_t write_header(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* out = static_cast<std::vector<std::string>*>(userdata);
+    size_t n = size * nmemb;
+    std::string line(ptr, n);
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+        line.pop_back();
+    if (!line.empty() && line.find(':') != std::string::npos)
+        out->push_back(line);
+    return n;
+}
+
 curl_slist* build_headers(const Headers& headers) {
     curl_slist* list = nullptr;
     for (const std::string& h : headers) list = curl_slist_append(list, h.c_str());
@@ -175,6 +188,18 @@ void apply_common(CURL* c, const std::string& url, curl_slist* hdrs, int timeout
 }
 
 } // namespace
+
+std::string Response::header(const std::string& name) const {
+    std::string want = to_lower(name);
+    for (const std::string& h : headers) {
+        size_t colon = h.find(':');
+        if (colon == std::string::npos) continue;
+        if (to_lower(trim(h.substr(0, colon))) == want)
+            return trim(h.substr(colon + 1));
+    }
+
+    return "";
+}
 
 void global_init() { curl_global_init(CURL_GLOBAL_DEFAULT); }
 void global_cleanup() { curl_global_cleanup(); }
@@ -198,6 +223,8 @@ Response get(const std::string& url, const Headers& headers, int timeout_s) {
     BodySink sink{&r.body, nullptr};
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_body);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &sink);
+    curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, write_header);
+    curl_easy_setopt(c, CURLOPT_HEADERDATA, &r.headers);
 
     CURLcode rc = curl_easy_perform(c);
     if (rc != CURLE_OK) r.error = curl_easy_strerror(rc);
@@ -226,6 +253,8 @@ Response post_json(const std::string& url, const Headers& headers,
     BodySink sink{&r.body, nullptr};
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_body);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &sink);
+    curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, write_header);
+    curl_easy_setopt(c, CURLOPT_HEADERDATA, &r.headers);
 
     CURLcode rc = curl_easy_perform(c);
     if (rc != CURLE_OK) r.error = curl_easy_strerror(rc);

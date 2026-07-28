@@ -12,6 +12,7 @@
 #pragma once
 
 #include "common.hpp"
+#include "config.hpp"
 #include "tools.hpp"
 
 namespace ppcode::web {
@@ -46,6 +47,13 @@ struct SearchConfig {
 
     // Fill keys from the environment.
     static SearchConfig from_env();
+
+    // The environment, then anything the config file supplies for whatever the
+    // environment left empty. An exported variable still wins, but a key typed
+    // into the settings window is now used instead of being written to disk and
+    // ignored -- which is what happened for as long as from_env() was the only
+    // way these were assembled.
+    static SearchConfig from_config(const Config& cfg);
 
     // Which backend Auto would actually choose, and why not the others.
     SearchBackend resolve() const;

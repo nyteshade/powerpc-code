@@ -287,11 +287,18 @@ int main(int argc, char** argv) {
     }
 
     if (want_providers) {
+        // The config file is read first: the table is extensible from it, and a
+        // listing that omitted the user's own providers would be answering a
+        // different question than the one asked.
+        std::vector<std::string> warn;
+        Config::load(config_path, &warn);
+
         for (const Provider* p : all_providers()) {
             std::string key = resolve_api_key(*p);
-            std::printf("%-12s %-34s %s\n", p->id.c_str(), p->base_url.c_str(),
+            std::printf("%-12s %-34s %s%s\n", p->id.c_str(), p->base_url.c_str(),
                         !p->needs_key ? "no key required"
-                                      : (key.empty() ? "NO KEY FOUND" : "key found"));
+                                      : (key.empty() ? "NO KEY FOUND" : "key found"),
+                        p->custom ? "  (yours)" : "");
         }
         return 0;
     }
@@ -423,7 +430,7 @@ int main(int argc, char** argv) {
     tools.add_extra_builtins(&todos);
     rag::add_tools(tools);
     add_job_tools(tools, jobs);
-    web::add_tools(tools, web::SearchConfig::from_env());
+    web::add_tools(tools, web::SearchConfig::from_config(cfg));
     xcode::add_tools(tools);
     if (appledocs::available()) appledocs::add_tools(tools);
     builderr::add_tools(tools);

@@ -48,6 +48,16 @@
   NSSecureTextField *keyField;
   NSTextField *keyNote;
   NSButton *useButton;
+  NSButton *removeButton;
+
+  // The sheet for adding one. Built on first use and kept, like the panel.
+  NSWindow *addPanel;
+  NSTextField *addName;
+  NSTextField *addId;
+  NSTextField *addURL;
+  NSTextField *addModel;
+  NSButton *addNeedsKey;
+  NSTextField *addStatus;
 }
 
 - (id)initWithBridge:(PPBridge *)b;

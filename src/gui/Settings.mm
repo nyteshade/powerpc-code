@@ -141,6 +141,12 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 
 - (NSView *)buildToolsTab;
 
+- (NSMutableDictionary *)mcpSpecFromFields;
+
+- (void)runMcpTest:(NSDictionary *)spec;
+
+- (void)mcpTestFinished:(NSString *)result;
+
 @end
 
 @implementation PPSettingsController
@@ -537,6 +543,9 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
                       defer:NO];
     [panel setTitle:@"ppcode Settings"];
     [panel setFrameAutosaveName:@"PPCodeSettings"];
+    // Kept in an ivar and reopened, so it must survive being closed. See the
+    // same line in Providers.mm for what happens without it.
+    [panel setReleasedWhenClosed:NO];
 
     NSTabView *tabs = [[[NSTabView alloc]
         initWithFrame:NSMakeRect(12, 46, 536, 342)] autorelease];
@@ -852,20 +861,23 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
   [self transportChanged:nil];
 }
 
-- (void)addMcp:(id)sender {
+// The entry the fields currently describe, or nil with the reason in the status
+// line. Shared by Add and Test, so Test tries exactly what Add would store --
+// otherwise a passing test proves nothing about the thing being saved.
+- (NSMutableDictionary *)mcpSpecFromFields {
   NSString *name = [[mcpName stringValue]
       stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
   if ([name length] == 0) {
     [mcpStatus setStringValue:@"Give the server a name."];
 
-    return;
+    return nil;
   }
   NSString *addr = [[mcpCommandOrUrl stringValue]
       stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
   if ([addr length] == 0) {
     [mcpStatus setStringValue:@"Give a URL or a command."];
 
-    return;
+    return nil;
   }
 
   NSMutableDictionary *s = [NSMutableDictionary dictionary];
@@ -910,6 +922,14 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
     }
   }
 
+  return s;
+}
+
+- (void)addMcp:(id)sender {
+  NSMutableDictionary *s = [self mcpSpecFromFields];
+  if (!s) { return; }
+  NSString *name = [s objectForKey:@"name"];
+
   // Replace an entry with the same name rather than adding a duplicate.
   NSUInteger existing = NSNotFound;
   for (NSUInteger i = 0; i < [mcpServers count]; i++)
@@ -931,9 +951,45 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
   [mcpStatus setStringValue:@"Removed. Choose Save to apply."];
 }
 
+// Actually connects. It used to print a sentence telling the user to save and
+// relaunch, which is not a test -- there was no way to tell a wrong URL from a
+// wrong token without restarting the application and reading the console.
+//
+// On a worker thread because a handshake against an unreachable host sits in
+// connect(2) for thirty seconds, and a spinning application is indistinguishable
+// from a hung one. -testMcpServer: touches no bridge state, which is what makes
+// calling it from here safe.
 - (void)testMcp:(id)sender {
-  [mcpStatus setStringValue:@"Save first, then the connection is attempted at "
-                             "launch and reported in the transcript."];
+  if (mcpTesting) { return; }
+
+  NSDictionary *spec = [self mcpSpecFromFields];
+  if (!spec) { return; }
+
+  mcpTesting = YES;
+  [mcpStatus setStringValue:[NSString stringWithFormat:
+      PPUTF8("Connecting to %@\xE2\x80\xA6"), [spec objectForKey:@"name"]]];
+
+  [NSThread detachNewThreadSelector:@selector(runMcpTest:)
+                           toTarget:self
+                         withObject:spec];
+}
+
+// On the worker thread. Its own pool: an autorelease pool is per-thread, and
+// without one every temporary here leaks.
+- (void)runMcpTest:(NSDictionary *)spec {
+  NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+
+  NSString *result = [bridge testMcpServer:spec];
+
+  [self performSelectorOnMainThread:@selector(mcpTestFinished:)
+                         withObject:result
+                      waitUntilDone:NO];
+  [pool release];
+}
+
+- (void)mcpTestFinished:(NSString *)result {
+  mcpTesting = NO;
+  [mcpStatus setStringValue:result ? result : @"No answer."];
 }
 
 // ---- CLI -------------------------------------------------------------------

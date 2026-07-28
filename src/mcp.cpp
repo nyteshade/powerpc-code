@@ -224,6 +224,14 @@ public:
         http::Response r = http::post_json(cfg_.url, h, msg.dump(), 120);
         if (!r.error.empty()) { if (error) *error = r.error; return false; }
 
+        // A Streamable HTTP server may open a session on initialize and hand
+        // out its id in this header; every later request has to carry it back.
+        // Without this the handshake succeeded and tools/list came straight
+        // back as "Bad Request: Mcp-Session-Id required", which reads exactly
+        // like a server that has no tools.
+        if (std::string sid = r.header("Mcp-Session-Id"); !sid.empty())
+            session_id_ = sid;
+
         // A notification legitimately returns 202 with no body.
         if (r.status == 202 || trim(r.body).empty()) return true;
 
@@ -275,8 +283,6 @@ public:
 
     void stop() override {}
     bool alive() const override { return true; }
-
-    void set_session(const std::string& s) { session_id_ = s; }
 
 private:
     McpServerConfig cfg_;
@@ -530,9 +536,60 @@ void Manager::connect_all(const std::vector<McpServerConfig>& configs,
     }
 }
 
+void Manager::reconnect_all(const std::vector<McpServerConfig>& configs,
+                            ToolRegistry& registry,
+                            const std::function<void(const std::string&)>& report) {
+    disconnect_all(registry);
+    connect_all(configs, registry, report);
+}
+
 void Manager::disconnect_all() {
     for (auto& s : servers_) s->disconnect();
     servers_.clear();
+}
+
+void Manager::disconnect_all(ToolRegistry& registry) {
+    // The tools have to go with the server. Leaving them behind offers the
+    // model a tool whose handler holds the last reference to a disconnected
+    // server, which answers every call with "not connected".
+    for (auto& s : servers_) {
+        registry.remove_source("mcp:" + s->name());
+        s->disconnect();
+    }
+    servers_.clear();
+}
+
+ProbeResult probe(const McpServerConfig& cfg) {
+    ProbeResult out;
+
+    if (cfg.name.empty()) { out.summary = "Give the server a name."; return out; }
+    if (cfg.transport == "http" && cfg.url.empty()) {
+        out.summary = "Give the server's URL.";
+        return out;
+    }
+    if (cfg.transport != "http" && cfg.command.empty()) {
+        out.summary = "Give the command to run.";
+        return out;
+    }
+
+    Server s(cfg);
+    std::string err;
+    if (!s.connect(&err)) {
+        // A failure carries the server's stderr, which is several lines. The
+        // caller has one line to put it in.
+        for (char& c : err) if (c == '\n' || c == '\r') c = ' ';
+        out.summary = cfg.name + ": " + elide(trim(err), 300);
+        return out;
+    }
+
+    for (const RemoteTool& t : s.tools()) out.tools.push_back(t.name);
+    out.ok = true;
+    out.summary = cfg.name + ": " + s.server_info() + ", " +
+                  std::to_string(out.tools.size()) + " tool" +
+                  (out.tools.size() == 1 ? "" : "s");
+    s.disconnect();
+
+    return out;
 }
 
 std::vector<std::string> Manager::status_lines() const {

@@ -149,6 +149,11 @@ struct BridgeState {
   std::vector<std::pair<std::string, std::string>> transcript;  // role, text
   std::mutex transcript_mu;
 
+  // Notes produced before there was a delegate to show them to. MCP servers
+  // are connected in -init, which is necessarily before the controller exists,
+  // so anything said about them then would otherwise reach only the console.
+  std::vector<std::string> pending_notes;
+
   // Indexing runs on its own thread and is deliberately serialised: one
   // database, one writer, and progress that means something.
   std::thread indexer;
@@ -164,12 +169,27 @@ struct BridgeState {
 
 - (void)runTurn:(const Message &)um;
 
+- (void)reportToTranscript:(const std::string &)line;
+
+- (void)appendTranscriptRole:(const std::string &)role
+                        text:(const std::string &)text;
+
 @end
 
 @implementation PPBridge
 
 - (id)delegate { return delegate; }
-- (void)setDelegate:(id)d { delegate = d; }
+
+- (void)setDelegate:(id)d {
+  delegate = d;
+
+  // Anything said before the interface existed is said again now, in order.
+  if (delegate && st && !st->pending_notes.empty()) {
+    std::vector<std::string> notes;
+    notes.swap(st->pending_notes);
+    for (const std::string &n : notes) [self reportToTranscript:n];
+  }
+}
 
 - (id)init {
   if (!(self = [super init])) return nil;
@@ -190,16 +210,21 @@ struct BridgeState {
   st->tools.add_extra_builtins(&st->todos);
   rag::add_tools(st->tools);
   add_job_tools(st->tools, st->jobs);
-  web::add_tools(st->tools, web::SearchConfig::from_env());
+  web::add_tools(st->tools, web::SearchConfig::from_config(st->cfg));
   xcode::add_tools(st->tools);
   builderr::add_tools(st->tools);
   xib::add_tools(st->tools);
   bundle::add_tools(st->tools);
   if (appledocs::available()) appledocs::add_tools(st->tools);
 
-  if (!st->cfg.mcp_servers.empty())
-      st->mcp.connect_all(st->cfg.mcp_servers, st->tools,
-                          [](const std::string &m) { NSLog(@"%s", m.c_str()); });
+  if (!st->cfg.mcp_servers.empty()) {
+    PPBridge *me = self;
+    st->mcp.connect_all(st->cfg.mcp_servers, st->tools,
+                        [me](const std::string &m) {
+                          NSLog(@"%s", m.c_str());
+                          [me reportToTranscript:m];
+                        });
+  }
 
   st->agent.reset(new Agent(*st->client, st->tools, st->cfg));
 
@@ -417,6 +442,8 @@ struct BridgeState {
   ev.approve = [=](const std::string &name, ToolKind,
                    const ToolPreview &pv) -> bool {
     if (state->cfg.yolo) return true;
+    // Already answered, permanently, by the "Always Allow" button.
+    if (state->cfg.tool_is_auto_approved(name)) return true;
     {
       std::lock_guard<std::mutex> lk(state->approve_mu);
       state->approve_done = false;
@@ -560,6 +587,28 @@ static ppcode::json ObjCToJson(id o) {
   return YES;
 }
 
+- (void)alwaysAllowTool:(NSString *)name {
+  std::string n = Cpp(name);
+  if (n.empty() || st->cfg.tool_is_auto_approved(n)) return;
+
+  st->cfg.auto_approve_tools.push_back(n);
+
+  // Read-modify-write the file rather than serialising the whole Config: the
+  // settings window owns most of these keys, and Config::save() knows about
+  // fewer of them than the file holds.
+  std::string text;
+  ppcode::json j = ppcode::json::object();
+  if (read_file_text(st->cfg.config_path, &text, nullptr)) {
+    ppcode::json parsed = ppcode::json::parse(text, nullptr, false, true);
+    if (!parsed.is_discarded() && parsed.is_object()) j = parsed;
+  }
+  j["auto_approve_tools"] = st->cfg.auto_approve_tools;
+
+  std::string werr;
+  if (!write_file_text(st->cfg.config_path, j.dump(2) + "\n", &werr))
+      NSLog(@"ppcode: could not record the approval: %s", werr.c_str());
+}
+
 - (void)reloadConfig {
   // Same race as -setModelId:: replacing cfg wholesale while a turn is running
   // would pull it out from under the worker thread.
@@ -567,9 +616,72 @@ static ppcode::json ObjCToJson(id o) {
 
   std::vector<std::string> warn;
   std::string path = st->cfg.config_path;
+  std::vector<McpServerConfig> was = st->cfg.mcp_servers;
   st->cfg = ppcode::Config::load(path, &warn);
   st->client->set_config(st->cfg);
+
+  // MCP servers are reconnected here, not only at launch. A server added in
+  // the settings window used to sit in the file doing nothing until the next
+  // relaunch, and the model -- correctly -- reported that no such tools
+  // existed. Before the prompt is rebuilt, so it lists what is now there.
+  //
+  // Only when the list actually changed: connecting is slow, and a server that
+  // has gone away holds this thread for the whole connect timeout. Paying that
+  // because someone moved the temperature slider would read as a hang.
+  if (was != st->cfg.mcp_servers) {
+    PPBridge *me = self;
+    st->mcp.reconnect_all(st->cfg.mcp_servers, st->tools,
+                          [me](const std::string &m) {
+                            NSLog(@"%s", m.c_str());
+                            [me reportToTranscript:m];
+                          });
+  }
+
   [self rebuildSystemPrompt];
+}
+
+// A line the user should see rather than one for the console: MCP connection
+// results are the obvious case, since a server that failed to start is
+// otherwise indistinguishable from one that has no tools.
+- (void)reportToTranscript:(const std::string &)line {
+  [self appendTranscriptRole:"system" text:line + "\n"];
+  if ([delegate respondsToSelector:@selector(bridgeDidReportNote:)])
+      [delegate bridgeDidReportNote:Str(line)];
+
+  else
+      st->pending_notes.push_back(line);
+}
+
+- (NSString *)testMcpServer:(NSDictionary *)spec {
+  ppcode::McpServerConfig c;
+  c.name      = Cpp([spec objectForKey:@"name"]);
+  c.transport = Cpp([spec objectForKey:@"transport"]);
+  c.command   = Cpp([spec objectForKey:@"command"]);
+  c.url       = Cpp([spec objectForKey:@"url"]);
+  if (c.transport.empty()) c.transport = "stdio";
+
+  NSEnumerator *ae = [[spec objectForKey:@"args"] objectEnumerator];
+  NSString *a;
+  while ((a = [ae nextObject]) != nil) c.args.push_back(Cpp(a));
+
+  NSDictionary *h = [spec objectForKey:@"headers"];
+  NSEnumerator *he = [h keyEnumerator];
+  NSString *k;
+  while ((k = [he nextObject]) != nil)
+      c.headers[Cpp(k)] = Cpp([h objectForKey:k]);
+
+  ppcode::mcp::ProbeResult r = ppcode::mcp::probe(c);
+  std::string text = (r.ok ? "OK -- " : "FAILED -- ") + r.summary;
+  if (r.ok && !r.tools.empty()) {
+    text += ": ";
+    for (size_t i = 0; i < r.tools.size(); i++) {
+      if (i) text += ", ";
+      if (i == 8) { text += "..."; break; }
+      text += r.tools[i];
+    }
+  }
+
+  return Str(text);
 }
 
 // ---- CLI installation ------------------------------------------------------
@@ -693,10 +805,116 @@ static ppcode::json ObjCToJson(id o) {
 
     [d setObject:[NSNumber numberWithBool:have ? YES : NO] forKey:@"hasKey"];
     [d setObject:Str(source) forKey:@"keySource"];
+    // Only a user-defined one can be deleted; the built-in table is fixed.
+    [d setObject:[NSNumber numberWithBool:p->custom ? YES : NO] forKey:@"custom"];
     [out addObject:d];
   }
 
   return out;
+}
+
+// The config file is the store for these, so both of the following edit the
+// file's "custom_providers" and reload. Going through the file rather than
+// poking the table directly means the command line tool sees the same set, and
+// means a provider survives a relaunch, which is the whole point of adding one.
+- (BOOL)addProviderWithId:(NSString *)pid
+                     name:(NSString *)pname
+                  baseURL:(NSString *)url
+             defaultModel:(NSString *)model
+                 needsKey:(BOOL)needsKey
+                    error:(NSString **)err {
+  if (st->busy.load()) {
+    if (err) *err = @"A turn is running. Finish it and try again.";
+
+    return NO;
+  }
+
+  // Not named `id`: that is a type in Objective-C.
+  std::string want = ppcode::sanitise_provider_id(Cpp(pid));
+  if (want.empty()) {
+    if (err) *err = @"Give the provider a short identifier: letters, digits "
+                     "and dashes.";
+
+    return NO;
+  }
+  // Normalised by make_custom_provider on the way back in; done here too so
+  // what is written to the file matches what will be used.
+  std::string base = trim(Cpp(url));
+  if (base.empty()) {
+    if (err) *err = @"Give the address of the service's API.";
+
+    return NO;
+  }
+  while (base.size() > 1 && base.back() == '/') base.pop_back();
+
+  if (const Provider *existing = find_provider(want); existing && !existing->custom) {
+    if (err)
+        *err = [NSString stringWithFormat:
+                   @"\"%@\" is one of the built-in providers and cannot be "
+                    "replaced. Choose another identifier.", Str(want)];
+
+    return NO;
+  }
+
+  NSMutableDictionary *cfg =
+      [[[self configDictionary] mutableCopy] autorelease];
+  NSMutableArray *list =
+      [[[cfg objectForKey:@"custom_providers"] mutableCopy] autorelease];
+  if (![list isKindOfClass:[NSMutableArray class]])
+      list = [NSMutableArray array];
+
+  NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+  [entry setObject:Str(want) forKey:@"id"];
+  [entry setObject:[pname length] ? pname : Str(want) forKey:@"name"];
+  [entry setObject:Str(base) forKey:@"base_url"];
+  [entry setObject:[NSNumber numberWithBool:needsKey] forKey:@"needs_key"];
+  if ([model length]) [entry setObject:model forKey:@"default_model"];
+
+  // Editing an existing entry rather than adding a second one with the same id.
+  NSUInteger i, found = NSNotFound;
+  for (i = 0; i < [list count]; i++)
+      if ([[[list objectAtIndex:i] objectForKey:@"id"] isEqualToString:Str(want)])
+          found = i;
+  if (found == NSNotFound) [list addObject:entry];
+  else [list replaceObjectAtIndex:found withObject:entry];
+
+  [cfg setObject:list forKey:@"custom_providers"];
+
+  return [self saveConfigDictionary:cfg error:err];
+}
+
+- (BOOL)removeProvider:(NSString *)pid error:(NSString **)err {
+  if (st->busy.load()) {
+    if (err) *err = @"A turn is running. Finish it and try again.";
+
+    return NO;
+  }
+
+  const Provider *p = find_provider(Cpp(pid));
+  if (!p || !p->custom) {
+    if (err) *err = @"That is one of the built-in providers; it cannot be "
+                     "removed.";
+
+    return NO;
+  }
+
+  NSMutableDictionary *cfg =
+      [[[self configDictionary] mutableCopy] autorelease];
+  NSMutableArray *keep = [NSMutableArray array];
+  NSEnumerator *e = [[cfg objectForKey:@"custom_providers"] objectEnumerator];
+  NSDictionary *entry;
+  while ((entry = [e nextObject]) != nil)
+      if (![[entry objectForKey:@"id"] isEqualToString:pid])
+          [keep addObject:entry];
+  [cfg setObject:keep forKey:@"custom_providers"];
+
+  // Deleting the one in use would leave the config naming a provider that no
+  // longer exists, which loads as a warning and a silent fall back to the
+  // default. Say so here instead, by moving first.
+  if ([pid isEqualToString:Str(st->cfg.provider_id)])
+      [cfg setObject:Str(ppcode::default_provider().id) forKey:@"provider_id"];
+
+  return [self saveConfigDictionary:cfg error:err];
 }
 
 - (NSString *)providerId { return Str(st->cfg.provider_id); }

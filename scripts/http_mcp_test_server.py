@@ -15,6 +15,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PROTOCOL_VERSION = "2025-06-18"
 
+# Real servers hand out a session id on initialize and reject anything that
+# comes back without it. Modelled here because a client that ignored the header
+# looked, from the outside, exactly like a server with no tools: the handshake
+# succeeded and tools/list came back 400.
+SESSION_ID = "ppcode-test-session"
+
 TOOLS = [
     {
         "name": "echo",
@@ -99,6 +105,17 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        # initialize opens the session; everything after it must present the id.
+        is_init = msg.get("method") == "initialize"
+        if not is_init and self.headers.get("Mcp-Session-Id") != SESSION_ID:
+            payload = b'{"error":"Mcp-Session-Id required"}'
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
         response = handle(msg)
         if response is None:
             # Notifications get an empty 202, per the spec.
@@ -111,6 +128,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
+        if is_init:
+            self.send_header("Mcp-Session-Id", SESSION_ID)
         self.end_headers()
         self.wfile.write(payload)
 

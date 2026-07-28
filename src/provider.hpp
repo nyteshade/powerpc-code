@@ -65,6 +65,13 @@ struct Provider {
     std::vector<std::string> favourites;   // ascending capability and cost
     std::vector<ModelDefaults> models;     // static metadata
 
+    // Defined by the user in the config file rather than compiled in. Only
+    // these can be edited or deleted from the interface.
+    bool custom = false;
+    // A custom provider that has since been deleted. It stays in the table
+    // because pointers to it have been handed out, and stops being listed.
+    bool hidden = false;
+
     const ModelDefaults* model_defaults(const std::string& id) const;
 };
 
@@ -76,6 +83,36 @@ const Provider& default_provider();
 
 // Comma-separated ids, for help text and error messages.
 std::string provider_id_list();
+
+// ---------------------------------------------------------------------------
+// User-defined providers
+//
+// Anything speaking the OpenAI chat shape can be talked to, and the table above
+// cannot anticipate which one someone will want -- a second LM Studio, a
+// llama.cpp server, a company gateway. So the table is extensible from the
+// config file's "custom_providers", and the interface can add to it.
+//
+// Pointers returned by find_provider() must stay valid for the life of the
+// process: a Config holds one, and reloading the config re-registers the whole
+// set. So entries are updated in place and never erased; one that goes away is
+// marked hidden and stops being listed.
+// ---------------------------------------------------------------------------
+
+// Fill in the defaults a hand-written provider needs but nobody wants to type.
+// `id` is sanitised to lower-case alphanumerics, '-' and '_'.
+Provider make_custom_provider(const std::string& id, const std::string& name,
+                              const std::string& base_url,
+                              const std::string& default_model, bool needs_key);
+
+// Replace the user-defined set with exactly this list.
+void set_custom_providers(const std::vector<Provider>& list);
+
+// The user-defined ones, in the order they were registered.
+std::vector<const Provider*> custom_providers();
+
+// Sanitise an id the way make_custom_provider() does, so a caller can check
+// for a collision before offering to create one.
+std::string sanitise_provider_id(const std::string& id);
 
 // The key for a provider: environment first, then its key file. Empty when
 // there is none, which is not an error for a provider that needs no key.

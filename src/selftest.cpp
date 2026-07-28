@@ -1346,6 +1346,63 @@ void test_providers() {
     check(provider_id_list().find("deepseek") != std::string::npos,
           "the id list names deepseek");
 
+    // User-defined providers. The table is extensible because it cannot
+    // anticipate every service that speaks this protocol, and the properties
+    // that matter are that one can be added, resolved, replaced and removed --
+    // and that a pointer taken before a reload is still safe to read after one,
+    // since a Config holds exactly that for its whole lifetime.
+    {
+        check(sanitise_provider_id(" Together AI! ") == "together-ai",
+              "an id is reduced to something usable as a filename and a flag");
+
+        std::vector<Provider> one;
+        one.push_back(make_custom_provider("together", "Together AI",
+                                           "https://api.together.xyz/v1/",
+                                           "moonshotai/Kimi-K2", true));
+        set_custom_providers(one);
+
+        const Provider* t = find_provider("together");
+        check(t != nullptr, "a custom provider resolves");
+        check(t && t->custom, "and is marked as one");
+        check(t && t->base_url == "https://api.together.xyz/v1",
+              "a trailing slash is trimmed off the address");
+        check(t && t->key_env.size() == 1 && t->key_env[0] == "TOGETHER_API_KEY",
+              "its key variable is derived from the id");
+        check(t && t->key_file == ".local/keys/together", "and so is its key file");
+        check(t && !t->supports_routing && !t->supports_plugins &&
+                  !t->cost_in_usage,
+              "no vendor extension is assumed of an unknown service");
+        check(custom_providers().size() == 1, "one custom provider is listed");
+
+        Config cc;
+        check(cc.use_provider("together", false, false), "and can be selected");
+        check(cc.base_url == "https://api.together.xyz/v1", "its address is used");
+
+        // Replacing the set in place: the pointer above must not dangle.
+        std::vector<Provider> two;
+        two.push_back(make_custom_provider("together", "Together",
+                                           "https://example.invalid/v1", "", false));
+        two.push_back(make_custom_provider("local2", "Second LM Studio",
+                                           "http://10.0.0.5:1234/v1", "", false));
+        set_custom_providers(two);
+        check(t == find_provider("together"),
+              "re-registering keeps the same storage, so held pointers stay good");
+        check(t && t->base_url == "https://example.invalid/v1",
+              "and the address is updated in place");
+        check(custom_providers().size() == 2, "the second one is listed too");
+
+        // Removing them: gone from every listing, and the built-ins untouched.
+        set_custom_providers(std::vector<Provider>());
+        check(find_provider("together") == nullptr, "a removed one stops resolving");
+        check(custom_providers().empty(), "and is no longer listed");
+        check(provider_id_list().find("together") == std::string::npos,
+              "nor named in the id list");
+        check(find_provider("openrouter") != nullptr &&
+              find_provider("deepseek") != nullptr &&
+              find_provider("lmstudio") != nullptr,
+              "the built-in providers are unaffected");
+    }
+
     // Saving a key, and reading it back the way the CLI would. HOME is moved to
     // a temporary directory for the duration so this never touches the real
     // ~/.local/keys, and the environment variables are cleared and restored,
@@ -1460,6 +1517,35 @@ void test_web() {
               "backend parsed");
         web::backend_from_string("nonsense", &ok);
         check(!ok, "bad backend name reported");
+    }
+
+    // Keys from the config file. The settings window has always written these;
+    // until from_config() existed nothing read them, so a key typed into the
+    // interface was saved to disk and then ignored, and search quietly stayed
+    // on Wikipedia lookups.
+    {
+        const char* tav_before = std::getenv("TAVILY_API_KEY");
+        std::string saved_tav = tav_before ? tav_before : "";
+        bool had_tav = tav_before != nullptr;
+        unsetenv("TAVILY_API_KEY");
+
+        Config cfg;
+        cfg.search_keys["tavily"] = "from-the-config-file";
+        web::SearchConfig sc = web::SearchConfig::from_config(cfg);
+        check(sc.tavily_key == "from-the-config-file",
+              "a search key in the config file is used");
+        check(sc.resolve() == web::SearchBackend::Tavily,
+              "and decides which backend runs");
+
+        // The environment still wins, so an exported key is not silently
+        // overridden by a stale one in the file.
+        setenv("TAVILY_API_KEY", "from-the-environment", 1);
+        check(web::SearchConfig::from_config(cfg).tavily_key ==
+                  "from-the-environment",
+              "an exported key still beats the file");
+
+        if (had_tav) setenv("TAVILY_API_KEY", saved_tav.c_str(), 1);
+        else unsetenv("TAVILY_API_KEY");
     }
 }
 

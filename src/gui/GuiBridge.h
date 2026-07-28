@@ -26,6 +26,11 @@
 - (BOOL)bridgeShouldAllowTool:(NSString *)name
                         title:(NSString *)title
                        detail:(NSString *)detail;
+@optional
+// Something the user should see that is not part of a turn: which MCP servers
+// connected, and which did not. Without it a server that failed to start looks
+// exactly like one that simply has no tools.
+- (void)bridgeDidReportNote:(NSString *)line;
 @end
 
 // Opaque C++ state. This header is only ever included from Objective-C++, so a
@@ -67,6 +72,19 @@ struct BridgeState;
 - (BOOL)saveConfigDictionary:(NSDictionary *)d error:(NSString **)err;
 - (void)reloadConfig;
 
+// Record that a tool never needs asking about again. Called from the approval
+// sheet's third button, so it happens with a turn in flight: it edits the file
+// and the live config in place rather than going through -reloadConfig, which
+// refuses to run mid-turn and would rebuild the world if it did.
+- (void)alwaysAllowTool:(NSString *)name;
+
+// Connect to one MCP server exactly as configured, report what came back, and
+// disconnect. Nothing is registered, so it can be run against an entry that has
+// not been saved yet. Blocking and slow -- call it off the main thread; it
+// touches no bridge state, which is what makes that safe.
+// The dictionary takes the same keys as an entry in "mcp_servers".
+- (NSString *)testMcpServer:(NSDictionary *)spec;
+
 // Installing the command line tool. The CLI is carried inside the bundle so the
 // application can be the thing that installs and updates it.
 - (NSString *)bundledCLIPath;
@@ -83,10 +101,29 @@ struct BridgeState;
 // Which service to talk to. The command line has --provider; without this the
 // application could only ever use whatever the config file said.
 
-// Dictionaries with: id, name, baseURL, hasKey, needsKey, keySource.
+// Dictionaries with: id, name, baseURL, hasKey, needsKey, keySource, custom.
 - (NSArray *)availableProviders;
 - (NSString *)providerId;
 - (NSString *)providerName;
+
+// Add or edit a user-defined provider, and remove one. Anything speaking the
+// OpenAI chat shape can be talked to, and the built-in table cannot anticipate
+// which one -- a second LM Studio, a llama.cpp server, a company gateway. Both
+// write the config file, so the command line tool sees the same set.
+//
+// Only the fields worth asking about are taken; the optional parts of the
+// protocol (routing, plugins, credits, a cost in the usage block) are each one
+// vendor's extension and are assumed absent.
+- (BOOL)addProviderWithId:(NSString *)pid
+                     name:(NSString *)pname
+                  baseURL:(NSString *)url
+             defaultModel:(NSString *)model
+                 needsKey:(BOOL)needsKey
+                    error:(NSString **)err;
+
+// Refuses for a built-in. If the one removed was in use, the default is
+// selected rather than leaving the config naming something that is gone.
+- (BOOL)removeProvider:(NSString *)pid error:(NSString **)err;
 
 // Switching reloads the model catalogue, since the previous provider's ids
 // mean nothing to the new one. Returns NO while a turn is running.

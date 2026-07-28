@@ -83,7 +83,17 @@ public:
                      ToolRegistry& registry,
                      const std::function<void(const std::string&)>& report);
 
+    // Drop everything currently connected -- including the tools it published
+    // into `registry` -- and connect the given set from scratch. This is what
+    // makes editing the server list take effect without a relaunch, which is
+    // how it behaved for as long as connect_all() was only ever called at
+    // startup.
+    void reconnect_all(const std::vector<McpServerConfig>& servers,
+                       ToolRegistry& registry,
+                       const std::function<void(const std::string&)>& report);
+
     void disconnect_all();
+    void disconnect_all(ToolRegistry& registry);
 
     std::vector<std::string> status_lines() const;
     size_t server_count() const { return servers_.size(); }
@@ -91,6 +101,17 @@ public:
 private:
     std::vector<std::shared_ptr<Server>> servers_;
 };
+
+// Connect to one server, describe what came back, and disconnect again. For a
+// "Test" button: nothing is registered and no state is kept, so it can be run
+// against an entry that has not been saved yet.
+struct ProbeResult {
+    bool ok = false;
+    std::string summary;              // one line, for a status field
+    std::vector<std::string> tools;   // remote names, as the server calls them
+};
+
+ProbeResult probe(const McpServerConfig& cfg);
 
 // Tool names are namespaced so two servers exposing "search" do not collide,
 // and sanitised to the character set the API allows for function names.

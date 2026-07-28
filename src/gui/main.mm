@@ -1701,6 +1701,17 @@ static NSString * const kProvidersItem = @"ppcode.providers";
   [self streamDelta:delta];
 }
 
+// Not part of a turn, so it does not open a streaming block: a plain grey line
+// in the transcript, where anyone looking for why a tool is missing will find
+// it.
+- (void)bridgeDidReportNote:(NSString *)line {
+  [self flushStream];
+  [self append:[NSString stringWithFormat:@"[%@]\n", line]
+         color:[NSColor darkGrayColor]
+          bold:NO
+          mono:NO];
+}
+
 - (void)bridgeDidStartTool:(NSString *)name detail:(NSString *)detail {
   // Settle the markdown first, or this line lands inside the buffered reply.
   [self flushStream];
@@ -1757,8 +1768,18 @@ static NSString * const kProvidersItem = @"ppcode.providers";
   [alert setInformativeText:[NSString stringWithFormat:@"%@\n\n%@", title, detail]];
   [alert addButtonWithTitle:@"Allow"];
   [alert addButtonWithTitle:@"Deny"];
+  // A question asked on every single call is not a decision, it is a thing to
+  // dismiss. This is the answer that sticks: it goes into the config file, so
+  // it survives a relaunch and the command line tool honours it too.
+  [alert addButtonWithTitle:@"Always Allow"];
   [alert setAlertStyle:NSInformationalAlertStyle];
   NSInteger r = [alert runModal];
+
+  if (r == NSAlertThirdButtonReturn) {
+    [bridge alwaysAllowTool:name];
+
+    return YES;
+  }
 
   return (r == NSAlertFirstButtonReturn) ? YES : NO;
 }
@@ -2191,6 +2212,31 @@ static BOOL writeViewPNG(NSView *view, NSString *path) {
       printf("  %-4s providers window has a %s\n", ok ? "ok" : "FAIL",
              wanted[i].what);
       if (!ok) failures++;
+    }
+
+    // Open, close, open again. A window built in code is released when it
+    // closes unless told otherwise, and the second -showWindow then talks to
+    // freed memory: the crash the user saw was "changing provider works once".
+    // Checked here because it costs nothing and the mistake is easy to make
+    // again in the next window.
+    // A window built in code is released when it closes unless told otherwise,
+    // and the second -showWindow then talks to freed memory: the crash the user
+    // saw was "changing provider works once, the next time quits the
+    // application". Asserted on the flag rather than by provoking it, because
+    // provoking it is a use-after-free, which does not reliably report as a
+    // failure -- it reports as whatever the freed memory happened to contain.
+    NSWindow *pw = [providers panelWindow];
+    BOOL keeps = ![pw isReleasedWhenClosed];
+    printf("  %-4s providers window survives being closed\n",
+           keeps ? "ok" : "FAIL");
+    if (!keeps) failures++;
+
+    if (keeps) {
+      [pw close];
+      BOOL same = ([providers panelWindow] == pw);
+      printf("  %-4s reopening it returns the same window\n",
+             same ? "ok" : "FAIL");
+      if (!same) failures++;
     }
   }
 

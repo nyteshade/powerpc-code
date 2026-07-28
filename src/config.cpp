@@ -69,6 +69,57 @@ bool Config::use_provider(const std::string& id, bool model_was_explicit,
     return true;
 }
 
+// "custom_providers": anything else that speaks the OpenAI chat shape. Applied
+// to the process-wide table before the config picks a provider out of it, so a
+// config naming its own provider resolves on the first load rather than the
+// second.
+static void parse_custom_providers(const json& arr,
+                                   std::vector<std::string>* warnings) {
+    std::vector<Provider> out;
+    if (arr.is_array()) {
+        for (const json& s : arr) {
+            if (!s.is_object()) continue;
+
+            std::string id = jstr(s, "id");
+            std::string url = jstr(s, "base_url");
+            if (id.empty() || url.empty()) {
+                if (warnings)
+                    warnings->push_back(
+                        "custom provider with no id or base_url ignored");
+                continue;
+            }
+
+            Provider p = make_custom_provider(id, jstr(s, "name"), url,
+                                              jstr(s, "default_model"),
+                                              jbool(s, "needs_key", true));
+
+            // The built-in table wins. Shadowing "openrouter" with a
+            // half-filled entry would quietly cost routing, plugins and cost
+            // reporting, and look like the service had changed.
+            if (const Provider* clash = find_provider(p.id);
+                clash && !clash->custom) {
+                if (warnings)
+                    warnings->push_back("custom provider \"" + p.id +
+                                        "\" has the same id as a built-in one "
+                                        "and was ignored");
+                continue;
+            }
+
+            if (const json* f = jptr(s, "favourites"); f && f->is_array())
+                for (const json& x : *f)
+                    if (x.is_string()) p.favourites.push_back(x.get<std::string>());
+            if (const json* e = jptr(s, "key_env"); e && e->is_array()) {
+                p.key_env.clear();
+                for (const json& x : *e)
+                    if (x.is_string()) p.key_env.push_back(x.get<std::string>());
+            }
+            out.push_back(std::move(p));
+        }
+    }
+
+    set_custom_providers(out);
+}
+
 static void parse_mcp(const json& arr, Config& cfg, std::vector<std::string>* warnings) {
     if (!arr.is_array()) return;
     for (const json& s : arr) {
@@ -150,10 +201,25 @@ Config Config::load(const std::string& explicit_path, std::vector<std::string>* 
             cfg.web_search    = jbool(j, "web_search", cfg.web_search);
             cfg.web_max_results =
                 static_cast<int>(jint(j, "web_max_results", cfg.web_max_results));
+            cfg.search_backend = jstr(j, "search_backend", cfg.search_backend);
+            if (const json* sk = jptr(j, "search_keys"); sk && sk->is_object())
+                for (auto it = sk->begin(); it != sk->end(); ++it)
+                    if (it.value().is_string() && !it.value().get<std::string>().empty())
+                        cfg.search_keys[it.key()] = it.value().get<std::string>();
+
+            if (const json* aa = jptr(j, "auto_approve_tools"); aa && aa->is_array())
+                for (const json& x : *aa)
+                    if (x.is_string()) cfg.auto_approve_tools.push_back(x.get<std::string>());
 
             // An API key in the config file is supported but discouraged.
             if (const json* k = jptr(j, "api_key"); k && k->is_string())
                 cfg.api_key = k->get<std::string>();
+
+            // Before use_provider() below, which has to be able to find one.
+            parse_custom_providers(jptr(j, "custom_providers")
+                                       ? *jptr(j, "custom_providers")
+                                       : json::array(),
+                                   warnings);
 
             if (const json* m = jptr(j, "mcp_servers")) parse_mcp(*m, cfg, warnings);
         } catch (const std::exception& e) {
@@ -209,6 +275,24 @@ bool Config::save(std::string* error) const {
         j["color"]              = color;
         j["auto_approve_reads"] = auto_approve_reads;
         j["yolo"]               = yolo;
+        if (!auto_approve_tools.empty()) j["auto_approve_tools"] = auto_approve_tools;
+        if (!search_keys.empty())        j["search_keys"] = search_keys;
+        if (!search_backend.empty())     j["search_backend"] = search_backend;
+
+        // Written from the live table rather than from a copy held here: the
+        // table is where they are added and removed, so it is the truth.
+        json customs = json::array();
+        for (const Provider* p : custom_providers()) {
+            json c;
+            c["id"]         = p->id;
+            c["name"]       = p->name;
+            c["base_url"]   = p->base_url;
+            c["needs_key"]  = p->needs_key;
+            if (!p->default_model.empty()) c["default_model"] = p->default_model;
+            if (!p->favourites.empty())    c["favourites"]    = p->favourites;
+            customs.push_back(c);
+        }
+        if (!customs.empty()) j["custom_providers"] = customs;
 
         json servers = json::array();
         for (const McpServerConfig& m : mcp_servers) {

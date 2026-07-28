@@ -109,6 +109,9 @@
   [panel setTitle:@"Indexed Content"];
   [panel setFrameAutosaveName:@"PPCodeLibrary"];
   [panel setMinSize:NSMakeSize(460, 280)];
+  // Kept in an ivar and reopened, so it must survive being closed. See the
+  // same line in Providers.mm for what happens without it.
+  [panel setReleasedWhenClosed:NO];
 
   NSView *content = [panel contentView];
 

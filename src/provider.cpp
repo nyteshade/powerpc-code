@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 
 namespace ppcode {
@@ -117,8 +118,16 @@ std::vector<Provider> build_registry() {
     return out;
 }
 
-const std::vector<Provider>& registry() {
-    static const std::vector<Provider> r = build_registry();
+// A deque, not a vector: appending to a vector moves every element, and
+// find_provider() hands out pointers that a Config keeps for its lifetime.
+// Appending to a deque leaves the existing elements exactly where they are.
+std::deque<Provider>& registry() {
+    static std::deque<Provider> r = [] {
+        std::deque<Provider> d;
+        for (const Provider& p : build_registry()) d.push_back(p);
+
+        return d;
+    }();
 
     return r;
 }
@@ -173,14 +182,23 @@ const Provider* find_provider(const std::string& id) {
     if (want.empty()) return &default_provider();
 
     for (const Provider& p : registry())
-        if (p.id == want) return &p;
+        if (p.id == want && !p.hidden) return &p;
 
     return nullptr;
 }
 
 std::vector<const Provider*> all_providers() {
     std::vector<const Provider*> out;
-    for (const Provider& p : registry()) out.push_back(&p);
+    for (const Provider& p : registry())
+        if (!p.hidden) out.push_back(&p);
+
+    return out;
+}
+
+std::vector<const Provider*> custom_providers() {
+    std::vector<const Provider*> out;
+    for (const Provider& p : registry())
+        if (p.custom && !p.hidden) out.push_back(&p);
 
     return out;
 }
@@ -190,11 +208,96 @@ const Provider& default_provider() { return registry()[0]; }
 std::string provider_id_list() {
     std::string out;
     for (const Provider& p : registry()) {
+        if (p.hidden) continue;
         if (!out.empty()) out += ", ";
         out += p.id;
     }
 
     return out;
+}
+
+std::string sanitise_provider_id(const std::string& id) {
+    std::string out;
+    for (char c : to_lower(trim(id))) {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')
+            out += c;
+        else if (c == ' ' || c == '.' || c == '/')
+            out += '-';
+    }
+
+    return out;
+}
+
+Provider make_custom_provider(const std::string& id, const std::string& name,
+                              const std::string& base_url,
+                              const std::string& default_model, bool needs_key) {
+    Provider p;
+    p.custom = true;
+    p.id = sanitise_provider_id(id);
+    p.name = trim(name).empty() ? p.id : trim(name);
+
+    // The endpoint paths are appended to this, so a trailing slash produces
+    // ".../v1//models" -- which some servers answer and others reject, making
+    // it exactly the sort of thing to normalise once rather than debug twice.
+    p.base_url = trim(base_url);
+    while (p.base_url.size() > 1 && p.base_url.back() == '/') p.base_url.pop_back();
+
+    // The environment variable name a key would be exported under, derived from
+    // the id so it is predictable enough to put in a shell profile.
+    std::string env;
+    for (char c : p.id)
+        env += std::isalnum(static_cast<unsigned char>(c))
+                   ? static_cast<char>(std::toupper(static_cast<unsigned char>(c)))
+                   : '_';
+    p.key_env = {env + "_API_KEY"};
+    p.key_file = ".local/keys/" + p.id;
+    p.needs_key = needs_key;
+
+    // What an unknown OpenAI-compatible endpoint can be assumed to do, and no
+    // more. /models is near-universal; the rest -- routing, plugins, credits,
+    // a cost in the usage block -- are one vendor's extensions each, and asking
+    // for them where they are not implemented is how a request comes back 400.
+    p.has_models_endpoint = true;
+    p.models_have_metadata = false;
+    p.has_credits = false;
+    p.supports_routing = false;
+    p.supports_plugins = false;
+    p.cost_in_usage = false;
+    p.attribution_headers = false;
+    p.default_model = trim(default_model);
+
+    return p;
+}
+
+void set_custom_providers(const std::vector<Provider>& list) {
+    std::deque<Provider>& r = registry();
+
+    // Anything user-defined is hidden first, then un-hidden as the new list
+    // reinstates it. Nothing is erased: a Config out there holds a pointer.
+    for (Provider& p : r)
+        if (p.custom) p.hidden = true;
+
+    for (const Provider& want : list) {
+        if (want.id.empty()) continue;
+
+        bool replaced = false;
+        for (Provider& p : r) {
+            if (p.id != want.id) continue;
+            // A built-in of the same id wins: the table is the contract, and
+            // silently shadowing "openrouter" with a half-filled entry would
+            // be a very confusing way to lose routing and cost reporting.
+            if (!p.custom) { replaced = true; break; }
+
+            std::string id = p.id;
+            p = want;
+            p.id = id;
+            p.custom = true;
+            p.hidden = false;
+            replaced = true;
+            break;
+        }
+        if (!replaced) r.push_back(want);
+    }
 }
 
 std::string resolve_api_key(const Provider& p) {

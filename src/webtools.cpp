@@ -247,6 +247,29 @@ SearchConfig SearchConfig::from_env() {
     return c;
 }
 
+SearchConfig SearchConfig::from_config(const Config& cfg) {
+    SearchConfig c = from_env();
+
+    auto fill = [&cfg](std::string* slot, const char* key) {
+        if (!slot->empty()) return;             // the environment already won
+        auto it = cfg.search_keys.find(key);
+        if (it != cfg.search_keys.end()) *slot = it->second;
+    };
+    fill(&c.brave_key,   "brave");
+    fill(&c.tavily_key,  "tavily");
+    fill(&c.serper_key,  "serper");
+    fill(&c.searxng_url, "searxng");
+
+    if (c.backend == SearchBackend::Auto && !cfg.search_backend.empty()) {
+        bool ok = false;
+        SearchBackend parsed = backend_from_string(cfg.search_backend, &ok);
+        if (ok) c.backend = parsed;
+    }
+    if (cfg.web_max_results > 0) c.max_results = cfg.web_max_results;
+
+    return c;
+}
+
 SearchBackend SearchConfig::resolve() const {
     if (backend != SearchBackend::Auto) return backend;
     // Prefer the backends that return real web results.
@@ -581,7 +604,12 @@ void add_tools(ToolRegistry& registry, const SearchConfig& cfg) {
             },
             "required": ["query"]
         })");
-        t.kind = ToolKind::Execute;
+        // A search reads the public web and changes nothing, so it is not gated.
+        // It used to be, and a turn that searched five times asked five times --
+        // which taught nobody anything and made the answer arrive a minute late.
+        // web_fetch stays behind the gate: it takes a URL the model chose, and a
+        // URL can carry data outward as easily as bring it back.
+        t.kind = ToolKind::Read;
         t.source = "builtin";
         t.preview = [](const json& a) {
             return ToolPreview{"web_search", jstr(a, "query")};

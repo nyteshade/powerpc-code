@@ -18,6 +18,17 @@ struct McpServerConfig {
     std::string url;
     std::map<std::string, std::string> headers;
     bool enabled = true;
+
+    // So a front end can tell whether saving the settings actually changed
+    // anything here. Reconnecting is slow -- a server that has gone away holds
+    // the caller for the whole connect timeout -- and doing it because someone
+    // adjusted the temperature slider would read as a hang.
+    bool operator==(const McpServerConfig& o) const {
+        return name == o.name && transport == o.transport &&
+               command == o.command && args == o.args && env == o.env &&
+               url == o.url && headers == o.headers && enabled == o.enabled;
+    }
+    bool operator!=(const McpServerConfig& o) const { return !(*this == o); }
 };
 
 struct Config {
@@ -70,6 +81,13 @@ struct Config {
     bool web_search = false;
     int web_max_results = 5;
 
+    // Credentials for the web_search tool's backends, keyed by backend name
+    // ("tavily", "brave", "serper") plus "searxng" for a base URL. The settings
+    // window has always written these; until they were read here they went
+    // nowhere, and search silently fell back to Wikipedia lookups.
+    std::map<std::string, std::string> search_keys;
+    std::string search_backend;       // empty => pick whichever is configured
+
     // Prompt caching. The system message here is thousands of tokens of machine
     // and platform context that is identical on every round of a turn, so
     // caching it is the single biggest cost lever available.
@@ -98,6 +116,18 @@ struct Config {
     // Tool policy
     bool auto_approve_reads = true;   // read_file/list_dir/glob/grep need no prompt
     bool yolo = false;                // approve every tool without asking
+
+    // Tools the user has said yes to permanently. A prompt that reappears on
+    // every call is not a safety measure, it is a thing to click through
+    // without reading; answering it once has to mean something.
+    std::vector<std::string> auto_approve_tools;
+
+    bool tool_is_auto_approved(const std::string& name) const {
+        for (const std::string& n : auto_approve_tools)
+            if (n == name) return true;
+
+        return false;
+    }
 
     std::vector<McpServerConfig> mcp_servers;
 

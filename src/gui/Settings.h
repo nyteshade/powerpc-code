@@ -54,6 +54,9 @@
   NSSecureTextField *mcpHeaderValue;
   NSButton *mcpEnabled;
   NSTextField *mcpStatus;
+  // A test runs on its own thread; this keeps a second one from being started
+  // on top of the first.
+  BOOL mcpTesting;
 
   // Tools
   NSTextField *cliStatus;

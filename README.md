@@ -154,6 +154,40 @@ Other services are selected with `--provider` (`openrouter`, `deepseek`,
 `lmstudio`), or in the application from **Change Providers…** at the top of the
 model menu, which is also where each one's address and key are set.
 
+### Adding a provider
+
+The built-in table cannot anticipate every service that speaks the OpenAI
+chat-completions shape — a second LM Studio, a llama.cpp server, a company
+gateway — so it is extensible. **Add…** in the Providers window asks for a name,
+a short identifier, the API address and whether a key is needed; or write it
+into the config file directly:
+
+```json
+{
+  "custom_providers": [
+    {
+      "id": "together",
+      "name": "Together AI",
+      "base_url": "https://api.together.xyz/v1",
+      "default_model": "moonshotai/Kimi-K2",
+      "needs_key": true
+    }
+  ]
+}
+```
+
+The identifier is what `--provider` takes and what names the key file
+(`~/.local/keys/together`, read back as `TOGETHER_API_KEY`). Reusing an existing
+identifier edits that provider; a built-in one is refused rather than shadowed,
+because a half-filled entry would silently cost routing, plugins and cost
+reporting. `ppcode --providers` lists everything, marking yours.
+
+Only the universal parts of the protocol are assumed: `/models`, and chat
+completions. Routing preferences, the web plugin, a credits endpoint and a cost
+figure in the usage block are each one vendor's extension, so they are left off
+— asking for them where they are not implemented is how a request comes back
+`400`.
+
 ## Usage
 
 Interactive:
@@ -429,10 +463,20 @@ that change something (`write_file`, `edit_file`, `multi_edit`, `file_op`,
 need permission:
 
 - **Interactively** you get a prompt: `y` allow once, `n` deny, `a` allow
-  everything for the rest of the session.
+  everything for the rest of the session. The application's prompt has a third
+  button, **Always Allow**, which records the tool in `auto_approve_tools` in
+  the config file — so the answer survives a relaunch, and the command line tool
+  honours it too.
 - **Headless** they are *refused by default*, so a script that forgets to grant
   permission fails safe rather than rewriting your disk. Opt in with
   `--allow-tool NAME` (repeatable) or `--yolo`. `--deny-tool` overrides both.
+  `auto_approve_tools` is deliberately *not* consulted here: an unattended run
+  should say what it permits.
+
+`web_search` is read-only and never prompts — it reads the public web and
+changes nothing, and a turn that searches five times asking five times taught
+nobody anything. `web_fetch` still asks, because it takes a URL the model chose,
+and a URL carries data outward as easily as it brings it back.
 
 ## MCP
 

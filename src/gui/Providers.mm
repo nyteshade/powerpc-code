@@ -85,6 +85,16 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 
 - (void)useSelected:(id)sender;
 
+- (void)addProvider:(id)sender;
+
+- (void)removeProvider:(id)sender;
+
+- (void)buildAddPanel;
+
+- (void)confirmAdd:(id)sender;
+
+- (void)cancelAdd:(id)sender;
+
 @end
 
 @implementation PPProvidersController
@@ -102,6 +112,7 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
   [bridge release];
   [providers release];
   [panel release];
+  [addPanel release];
   [super dealloc];
 }
 
@@ -156,12 +167,14 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
     [addressField setStringValue:@""];
     [keyNote setStringValue:@""];
     [useButton setEnabled:NO];
+    [removeButton setEnabled:NO];
 
     return;
   }
 
   NSString *pid = [p objectForKey:@"id"];
   BOOL inUse = [pid isEqualToString:[bridge providerId]];
+  [removeButton setEnabled:[[p objectForKey:@"custom"] boolValue]];
   BOOL hasKey = [[p objectForKey:@"hasKey"] boolValue];
   BOOL needsKey = [[p objectForKey:@"needsKey"] boolValue];
   NSString *source = [p objectForKey:@"keySource"];
@@ -230,6 +243,12 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
                     defer:NO];
   [panel setTitle:@"Providers"];
   [panel setFrameAutosaveName:@"PPCodeProviders"];
+  // A window built in code is released when it closes unless told otherwise,
+  // and this one is kept in an ivar and reopened. Without this line the second
+  // Change Providers went to a freed window: closing it left `panel` pointing
+  // at nothing, -buildPanel saw non-nil and returned, and the first message
+  // sent to it took the application down.
+  [panel setReleasedWhenClosed:NO];
 
   NSView *content = [panel contentView];
 
@@ -342,6 +361,17 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
       MakePush(@"Close", NSMakeRect(308, 16, 84, 28), panel,
                @selector(performClose:))];
 
+  // Under the list, because they act on the list. The built-in table cannot
+  // anticipate every service that speaks this protocol, and until there was a
+  // way to add one, the only recourse was to point LM Studio's entry at
+  // something that was not LM Studio.
+  [content addSubview:
+      MakePush(PPUTF8("Add\xE2\x80\xA6"), NSMakeRect(20, 16, 74, 28), self,
+               @selector(addProvider:))];
+  removeButton = MakePush(@"Remove", NSMakeRect(100, 16, 84, 28), self,
+                          @selector(removeProvider:));
+  [content addSubview:removeButton];
+
   [panel center];
 }
 
@@ -403,6 +433,167 @@ static NSButton *MakePush(NSString *title, NSRect frame, id target, SEL action) 
 
   // The model list belongs to the old service and means nothing to the new one,
   // so whoever is showing it has to be told.
+  if ([delegate respondsToSelector:@selector(providersDidChangeProvider)])
+      [delegate providersDidChangeProvider];
+}
+
+// --- adding and removing ----------------------------------------------------
+
+- (void)buildAddPanel {
+  if (addPanel) { return; }
+
+  addPanel = [[NSWindow alloc]
+      initWithContentRect:NSMakeRect(0, 0, 460, 296)
+                styleMask:NSTitledWindowMask
+                  backing:NSBackingStoreBuffered
+                    defer:NO];
+  [addPanel setTitle:@"Add Provider"];
+  [addPanel setReleasedWhenClosed:NO];
+
+  NSView *v = [addPanel contentView];
+  CGFloat y = 272;
+  CGFloat r;
+  const CGFloat kLabX = 16, kFldX = 122, kFldW = 322;
+
+  r = NextRow(&y, 3 * kLineH, 2);
+  [v addSubview:MakeNote(
+      @"Anything that answers the OpenAI chat-completions API. Give the address "
+       "of the API root -- the part before /chat/completions, usually ending "
+       "in /v1.",
+      NSMakeRect(kLabX, r, 428, 3 * kLineH))];
+
+  r = NextRow(&y, kFieldH, 12);
+  [v addSubview:MakeLabel(@"Name:",
+                          NSMakeRect(kLabX, Centred(r, kFieldH, kLabelH), 96,
+                                     kLabelH), NO)];
+  addName = [[[NSTextField alloc]
+      initWithFrame:NSMakeRect(kFldX, r, kFldW, kFieldH)] autorelease];
+  [[addName cell] setPlaceholderString:@"Together AI"];
+  [v addSubview:addName];
+
+  r = NextRow(&y, kFieldH, 8);
+  [v addSubview:MakeLabel(@"Identifier:",
+                          NSMakeRect(kLabX, Centred(r, kFieldH, kLabelH), 96,
+                                     kLabelH), NO)];
+  addId = [[[NSTextField alloc]
+      initWithFrame:NSMakeRect(kFldX, r, kFldW, kFieldH)] autorelease];
+  [[addId cell] setPlaceholderString:@"together"];
+  [v addSubview:addId];
+
+  r = NextRow(&y, 2 * kLineH, 2);
+  [v addSubview:MakeNote(
+      @"Short, no spaces. It names the key file and is what --provider takes on "
+       "the command line. Reusing an existing one edits that provider.",
+      NSMakeRect(kFldX, r, kFldW, 2 * kLineH))];
+
+  r = NextRow(&y, kFieldH, 8);
+  [v addSubview:MakeLabel(@"Address:",
+                          NSMakeRect(kLabX, Centred(r, kFieldH, kLabelH), 96,
+                                     kLabelH), NO)];
+  addURL = [[[NSTextField alloc]
+      initWithFrame:NSMakeRect(kFldX, r, kFldW, kFieldH)] autorelease];
+  [[addURL cell] setPlaceholderString:@"https://api.example.com/v1"];
+  [v addSubview:addURL];
+
+  r = NextRow(&y, kFieldH, 8);
+  [v addSubview:MakeLabel(@"Model:",
+                          NSMakeRect(kLabX, Centred(r, kFieldH, kLabelH), 96,
+                                     kLabelH), NO)];
+  addModel = [[[NSTextField alloc]
+      initWithFrame:NSMakeRect(kFldX, r, kFldW, kFieldH)] autorelease];
+  [[addModel cell] setPlaceholderString:@"optional -- the model to start on"];
+  [v addSubview:addModel];
+
+  r = NextRow(&y, kLabelH, 10);
+  addNeedsKey = [[[NSButton alloc]
+      initWithFrame:NSMakeRect(kFldX, r, kFldW, kLabelH)] autorelease];
+  [addNeedsKey setButtonType:NSSwitchButton];
+  [addNeedsKey setTitle:@"This service needs an API key"];
+  [addNeedsKey setFont:[NSFont systemFontOfSize:11.0]];
+  [addNeedsKey setState:NSOnState];
+  [v addSubview:addNeedsKey];
+
+  r = NextRow(&y, 2 * kLineH, 6);
+  addStatus = MakeNote(@"", NSMakeRect(kLabX, r, 428, 2 * kLineH));
+  [[addStatus cell] setTextColor:[NSColor redColor]];
+  [v addSubview:addStatus];
+
+  NSButton *create = MakePush(@"Add", NSMakeRect(366, 12, 78, 28), self,
+                              @selector(confirmAdd:));
+  [create setKeyEquivalent:@"\r"];
+  [v addSubview:create];
+  NSButton *cancel = MakePush(@"Cancel", NSMakeRect(278, 12, 80, 28), self,
+                              @selector(cancelAdd:));
+  [cancel setKeyEquivalent:@"\033"];   // Escape, the way out of any sheet
+  [v addSubview:cancel];
+
+  [addPanel center];
+}
+
+- (void)addProvider:(id)sender {
+  [self buildAddPanel];
+
+  [addName setStringValue:@""];
+  [addId setStringValue:@""];
+  [addURL setStringValue:@""];
+  [addModel setStringValue:@""];
+  [addNeedsKey setState:NSOnState];
+  [addStatus setStringValue:@""];
+
+  [addPanel makeFirstResponder:addName];
+  [NSApp runModalForWindow:addPanel];
+  [addPanel orderOut:nil];
+
+  [self reload];
+}
+
+- (void)cancelAdd:(id)sender {
+  [NSApp stopModal];
+}
+
+- (void)confirmAdd:(id)sender {
+  NSString *err = nil;
+  if (![bridge addProviderWithId:[addId stringValue]
+                            name:[addName stringValue]
+                         baseURL:[addURL stringValue]
+                    defaultModel:[addModel stringValue]
+                        needsKey:[addNeedsKey state] == NSOnState
+                           error:&err]) {
+    // Reported in the sheet rather than in an alert stacked on top of it: the
+    // thing to fix is a field two inches away.
+    [addStatus setStringValue:err ? err : @"Could not add the provider."];
+
+    return;
+  }
+
+  [NSApp stopModal];
+}
+
+- (void)removeProvider:(id)sender {
+  NSDictionary *p = [self selectedProvider];
+  if (!p || ![[p objectForKey:@"custom"] boolValue]) { return; }
+
+  NSString *pid = [p objectForKey:@"id"];
+  NSAlert *a = [[[NSAlert alloc] init] autorelease];
+  [a setMessageText:[NSString stringWithFormat:@"Remove %@?",
+                        [p objectForKey:@"name"]]];
+  [a setInformativeText:
+      @"The provider is removed from the configuration. Any key saved for it "
+       "stays in ~/.local/keys and is not deleted."];
+  [a addButtonWithTitle:@"Remove"];
+  [a addButtonWithTitle:@"Cancel"];
+  if ([a runModal] != NSAlertFirstButtonReturn) { return; }
+
+  NSString *err = nil;
+  if (![bridge removeProvider:pid error:&err]) {
+    NSAlert *b = [[[NSAlert alloc] init] autorelease];
+    [b setMessageText:@"Could not remove the provider."];
+    [b setInformativeText:err ? err : @"Unknown error."];
+    [b runModal];
+  }
+
+  [self reload];
+
   if ([delegate respondsToSelector:@selector(providersDidChangeProvider)])
       [delegate providersDidChangeProvider];
 }

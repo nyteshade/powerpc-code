@@ -13,6 +13,15 @@ struct Response {
     std::string error;     // transport-level error, empty on success
     bool cancelled = false;
 
+    // Response headers as "Name: value", status line dropped. Kept because MCP
+    // over Streamable HTTP hands out its session id in one -- a client that
+    // ignores it gets a 400 on the very next request and reports the server as
+    // broken.
+    std::vector<std::string> headers;
+
+    // Case-insensitive lookup. Empty when absent.
+    std::string header(const std::string& name) const;
+
     bool ok() const { return error.empty() && status >= 200 && status < 300; }
 };
 

@@ -1015,6 +1015,7 @@ void Tui::start_turn(const std::string& text) {
         ev.approve = [this](const std::string& name, ToolKind,
                             const ToolPreview& pv) -> bool {
             if (cfg_.yolo) return true;
+            if (cfg_.tool_is_auto_approved(name)) return true;
             std::unique_lock<std::mutex> lk(gate_.mu);
             gate_.pending = true;
             gate_.answered = false;

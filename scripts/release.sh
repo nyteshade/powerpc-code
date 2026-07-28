@@ -10,7 +10,7 @@
 #
 # What it produces:
 #   ppcode-<v>-ppc-macos10.5-app.tar.gz   the .app, self-contained, no MacPorts
-#   ppcode-<v>-ppc-macos10.5-cli.tar.gz   the CLI, needs MacPorts (see below)
+#   ppcode-<v>-ppc-macos10.5-cli.tar.gz   the CLI, self-contained, no MacPorts
 set -euo pipefail
 
 HOST="${PPCODE_HOST:-brie@10.0.0.102}"
