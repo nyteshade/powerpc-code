@@ -122,6 +122,28 @@ rather than guessed at.
   rendering, but neither drives `-streamDelta:` with real deltas.
 - **`xib` connection editing** was deliberately not implemented — see §4.
 
+### 3.6 From a night's use (28 Jul) — done, but the field reports remain
+
+Four things Brielle hit in ordinary use, all fixed in `1df6192`. Recorded here
+because each one was invisible from the inside and only a real session found it:
+
+- ~~**Changing provider twice quit the application.**~~ A window built in code
+  is released when it closes; the ivar then pointed at freed memory. Fixed in
+  all three windows, asserted in `--check`.
+- ~~**No way to add a provider.**~~ The workaround was to point LM Studio's
+  entry somewhere else. `custom_providers` in the config, **Add…** in the
+  Providers window.
+- ~~**MCP was configurable and inert.**~~ Three causes wearing the same
+  costume: the Streamable HTTP session id was never read back, servers were
+  connected only at launch, and the Test button did not test. All three fixed;
+  the HTTP fixture now demands a session id so the path stays covered.
+- ~~**Web search asked on every call.**~~ Now read-only and ungated; the
+  approval sheet grew *Always Allow* for everything else. Separately, the
+  search keys the settings window writes were read by nobody.
+
+**Still unverified against a real instance: LM Studio.** It is registered,
+fully configurable, and has never been pointed at anything.
+
 ---
 
 ## 4. Decisions already made — do not relitigate
