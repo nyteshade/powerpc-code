@@ -75,7 +75,7 @@ GUI_BIN   := build/ppcode-gui
 APP_NAME  := PowerPC Code
 APP       := build/$(APP_NAME).app
 
-.PHONY: all clean run install dirs lint gui app cli-dist
+.PHONY: all clean run install install-app dirs lint gui app cli-dist
 
 all: lint $(BIN)
 
@@ -196,6 +196,21 @@ install: $(BIN)
 	install -d $(HOME)/bin
 	install -m 755 $(BIN) $(HOME)/bin/ppcode
 	@echo "installed to $(HOME)/bin/ppcode"
+
+# Put the built bundle where it can be launched: every delivery ends here, or
+# what was tested is not what is being run.
+#
+# Removed and recopied rather than copied over the top -- a bundle is a
+# directory, and copying onto an existing one leaves whatever the new build no
+# longer ships. ditto rather than cp -R because it is the tool on this system
+# that preserves resource forks and bundle metadata; cp -R has historically
+# been the way to arrive at an application the Finder will not launch.
+APPDEST := /Applications/$(APP_NAME).app
+
+install-app: app
+	@rm -rf "$(APPDEST)"
+	@ditto "$(APP)" "$(APPDEST)"
+	@echo "installed $(APPDEST) ($(shell cat VERSION 2>/dev/null))"
 
 -include $(DEPS)
 -include $(GUI_DEPS)
